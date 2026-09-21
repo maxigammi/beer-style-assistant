@@ -21,7 +21,13 @@
 устанавливает на место с правильными правами (шаг 5). Доступ агента к git делается через deploy key (шаг 2):
 это единственное, что требует действия человека в GitHub.
 
-## Схема
+## Два варианта развёртывания
+
+- **A. systemd** (разделы «Схема» и «Установка» ниже): venv в `/opt/beer-bot`, системный пользователь.
+- **B. Docker** (раздел «Вариант: Docker» в конце): для VPS, где рядом уже работают другие боты и у агента
+  своя папка и зона ответственности. **На таком VPS выбран вариант B**; вариант A остаётся запасным.
+
+## Схема (вариант A)
 
 | Что | Где |
 |---|---|
@@ -264,8 +270,135 @@ E
 | «Индекс построен моделью X, а сейчас Y» | Сменили `EMBED_MODEL`: выполнить `scripts/ingest.py` |
 | Служба падает и перезапускается | `journalctl -u beer-bot -n 100`; после 5 падений за 5 минут systemd остановится сам |
 
+## Вариант: Docker
+
+Для агента с собственной папкой, который уже ведёт соседние контейнеры. Ничего не трогает на хосте,
+кроме своей папки: пользователь создаётся внутри образа, сертификат ставится в образ.
+**Эти файлы (Dockerfile, compose) в репозитории не лежат и на стороне автора не собирались**: первой
+настоящей сборкой станет сборка на VPS. Ниже требования и эталонные заготовки; расхождения фиксируй в отчёте.
+
+### Раскладка
+
+```
+<папка агента>/beer-bot/
+  app/                git-клон репозитория (только git pull, руками не править)
+  Dockerfile          свой файл агента; контекст сборки = <папка агента>/beer-bot
+  docker-compose.yml  свой файл агента
+  .dockerignore       свой файл агента (см. ниже)
+  .env                секреты, права 600 (кладёт человек)
+  certs/russian_trusted_root_ca.crt   корень Минцифры, отпечаток сверен (шаг 4 выше)
+  state/              том с данными: индекс и access.db (в git не попадает)
+```
+
+### Требования (по ним проверять, а не по заготовкам)
+
+1. **Базовый образ `python:3.14-slim`** (Debian). Не Alpine: `faiss-cpu` собран под glibc. Версия Python на
+   хосте (например, 3.12) для Docker не важна: в контейнере используется образ. Именно 3.14 проверена с
+   `requirements.lock`; другую версию использовать только после прогона тестов внутри образа.
+2. **`.dockerignore` обязан исключать секреты и данные**, иначе они окажутся в слоях образа и утекут вместе с ним:
+   `.env`, `.ssh`, `state`, `app/.git`, `app/data/index`, `app/data/access.db*`, `app/.env`. Копировать в образ
+   только `app/` явными строками `COPY`, никогда не `COPY . .` от корня контекста.
+3. **Данные только каталогом-томом, не файлами.** `STATE_DIR=/state` (переменная окружения) и том
+   `./state:/state`. Не монтировать `access.db` отдельным файлом: журнал SQLite создаётся рядом с базой, и при
+   монтировании одного файла он окажется в файловой системе контейнера и потеряется при его пересоздании.
+   Не монтировать и весь `data/`: он закроет `data/styles` (база знаний едет из образа).
+4. **Права на том.** Процесс в контейнере работает не от root, и `./state` должен быть ему доступен на запись.
+   Проще всего собрать образ с uid пользователя агента (`--build-arg UID=$(id -u)`), тогда `chown` не нужен.
+   Проверяется командой `scripts/preflight.py` (она реально пробует записать в `STATE_DIR`).
+5. **Сертификат Минцифры в образе**: `COPY` файла в `/usr/local/share/ca-certificates/` и `update-ca-certificates`.
+   Указывать путь к файлу переменной окружения не нужно и нельзя: `truststore` такую проверку игнорирует.
+   Убедиться, что в образе есть пакет `ca-certificates` (в `python:slim` он есть, но проверь).
+6. **Никакой общей сети** с соседними контейнерами: боту нужен только исходящий трафик (long polling), входящих
+   портов нет. Сеть по умолчанию достаточна.
+7. **Логи Docker не ротируются по умолчанию**: задать `logging: max-size`.
+8. **Секреты**: `env_file: .env`. Файл `.env` кладёт человек уже готовым; не собирать его из `.env` других
+   проектов, даже своих (это ещё и решение про общий ключ GigaChat, см. шаг 0).
+9. **Один экземпляр** и один токен: `docker compose up -d`, не `run bot`. Разовые команды
+   (`ingest`, `preflight`, тесты) идут через `docker compose run --rm bot <команда>`.
+
+### Эталонные заготовки
+
+```dockerfile
+FROM python:3.14-slim
+ARG UID=10001
+COPY certs/russian_trusted_root_ca.crt /usr/local/share/ca-certificates/russian_trusted_root_ca.crt
+RUN update-ca-certificates && useradd --system --uid ${UID} --create-home beerbot
+WORKDIR /app
+COPY app/requirements.lock .
+RUN pip install --no-cache-dir -r requirements.lock
+COPY app/ /app/
+ENV STATE_DIR=/state PYTHONUNBUFFERED=1 TZ=Europe/Moscow
+USER beerbot
+CMD ["python", "bot.py"]
+```
+
+```yaml
+services:
+  bot:
+    build:
+      context: .
+      args: { UID: "${BOT_UID:-10001}" }
+    image: beer-bot:local
+    container_name: beer-bot
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./state:/state
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+```
+
+### Порядок действий
+
+```bash
+mkdir -p state && chmod 700 state
+export BOT_UID=$(id -u)
+docker compose build
+# 1. Проверка окружения ВНУТРИ контейнера: сертификат, сеть, ключи (значения не печатает), запись в state
+docker compose run --rm bot python scripts/preflight.py
+# 2. Офлайн-тесты внутри образа (без ключей и сети)
+docker compose run --rm bot sh -c 'for t in test_access test_compare test_pipeline test_gigachat test_config_preflight; do python tests/$t.py || exit 1; done'
+# 3. Индекс (нужен OPENAI_API_KEY; ожидаемо «Проиндексировано стилей: 123»)
+docker compose run --rm bot python scripts/ingest.py
+# 4. Запуск и проверка
+docker compose up -d
+docker compose logs --tail 40 bot      # «Бот запущен», без ERROR / 409 / SSL
+```
+
+Пункт 1 должен пройти целиком (единственное допустимое `[warn]` до пункта 3: «индекса нет»). `[FAIL]` по
+GigaChat с ошибкой сертификата означает, что корень Минцифры не попал в образ.
+
+### Обновление и откат
+
+```bash
+cd <папка>/beer-bot/app && git pull --ff-only && cd ..
+docker compose build
+docker compose run --rm bot python scripts/preflight.py
+# если менялись app/data/styles/*.md или EMBED_MODEL:
+docker compose run --rm bot python scripts/ingest.py
+docker compose up -d
+```
+
+Откат: `git checkout <предыдущий-коммит>` в `app/`, затем те же `build` и `up -d`. Каталог `state/` обновление не
+затрагивает.
+
+### Резервная копия списка пользователей
+
+Копируется на хосте из тома, бота останавливать не нужно (используется штатный механизм резервного копирования SQLite):
+
+```bash
+mkdir -p backups && python3 - <<'PYEND'
+import sqlite3, datetime
+src = sqlite3.connect("state/access.db")
+dst = sqlite3.connect(f"backups/access-{datetime.date.today()}.db")
+src.backup(dst)
+PYEND
+```
+
 ## Что не проверено
 
-Развёртывание на реальном VPS ещё не выполнялось: инструкция проверена на чистом клоне репозитория
-(установка из lock-файла и офлайн-тесты) и через `systemd-analyze verify` для службы. Доступность
+Развёртывание на реальном VPS ещё не выполнялось: вариант A проверен на чистом клоне репозитория
+(установка из lock-файла и офлайн-тесты) и через `systemd-analyze verify`; вариант B (Docker) на стороне автора
+не собирался вообще, так как там нет Docker. Доступность
 OpenAI и GigaChat зависит от региона VPS, поэтому `preflight.sh` нужно выполнять до запуска.
