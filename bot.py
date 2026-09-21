@@ -7,6 +7,7 @@ Beer Style Assistant — Telegram-бот со справочником пивн�
 import asyncio
 import functools
 import logging
+import logging.handlers
 import re
 import time
 from dataclasses import dataclass
@@ -28,7 +29,12 @@ from access import AccessStore, User
 logging.basicConfig(
     level=getattr(logging, config.LOG_LEVEL),
     format=config.LOG_FORMAT,
-    handlers=[logging.FileHandler("bot.log", encoding="utf-8"), logging.StreamHandler()],
+    handlers=[
+        # Лог рядом с кодом (а не в текущей папке) и с ротацией: на сервере файл не должен расти вечно
+        logging.handlers.RotatingFileHandler(config.BASE_DIR / "bot.log", maxBytes=5_000_000,
+                                             backupCount=3, encoding="utf-8"),
+        logging.StreamHandler(),
+    ],
 )
 logger = logging.getLogger(__name__)
 
