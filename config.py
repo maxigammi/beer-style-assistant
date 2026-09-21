@@ -11,8 +11,9 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-# Берём корневые сертификаты из хранилища ОС (нужны для api.giga.chat / Минцифры),
-# а не из certifi. Без пакета truststore — стандартное поведение requests.
+# Берём корневые сертификаты из хранилища ОС (нужны для api.giga.chat / Минцифры), а не из certifi.
+# Корень Минцифры должен стоять в хранилище ОС (в Docker: в образе, update-ca-certificates).
+# Указать отдельный файл сертификата нельзя: пока подключён truststore, проверка по файлу игнорируется.
 try:
     import truststore
 
@@ -42,8 +43,6 @@ GIGACHAT_SCOPE = os.getenv("GIGACHAT_SCOPE", "GIGACHAT_API_PERS")
 GIGACHAT_MODEL = os.getenv("GIGACHAT_MODEL", "GigaChat-2-Pro")  # Lite (GigaChat-2) плохо держит запрет «не выдумывай»
 GIGACHAT_OAUTH_URL = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
 GIGACHAT_API_URL = "https://api.giga.chat/v1"
-# Путь к PEM с корневым сертификатом Минцифры, если его нет в хранилище ОС
-GIGACHAT_CA_BUNDLE = os.getenv("GIGACHAT_CA_BUNDLE") or None
 REQUEST_TIMEOUT = 60
 
 # ========== ХРАНИЛИЩЕ ==========
