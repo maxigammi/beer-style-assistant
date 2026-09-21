@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 from config import (
-    EMBED_MODEL, MAX_CONTEXT_CHARS, MIN_SCORE, NO_CONTEXT_REPLY, RAG_PROMPT_TEMPLATE,
+    EMBED_MODEL, MAX_CONTEXT_CHARS, MIN_SCORE, NO_CONTEXT_REPLY, RAG_PROMPT_TEMPLATE, REWRITE_PROMPT,
     STYLES_DIR, SYSTEM_PROMPT, TOP_K_RESULTS,
 )
 from llm.gigachat import GigaChatClient, GigaChatError
@@ -53,6 +53,20 @@ class RAGPipeline:
         self.is_loaded = True
         return len(chunks)
 
+    def rewrite_query(self, query: str, history: Optional[List[Dict[str, str]]] = None) -> str:
+        """Английский поисковый запрос от LLM; при сбое — исходный вопрос."""
+        messages = [{"role": "system", "content": REWRITE_PROMPT}]
+        messages.extend((history or [])[-4:])
+        messages.append({"role": "user", "content": query})
+        try:
+            rewritten = self.llm.chat(messages, temperature=0.0, max_tokens=60).strip().strip('"')
+        except GigaChatError as e:
+            logger.warning(f"Переписывание запроса не удалось, ищем по исходному: {e}")
+            return query
+        logger.info(f"Запрос: {query!r} -> {rewritten!r}")
+        # Исходный текст оставляем: в нём могут быть названия марок и стилей как есть
+        return f"{query}\n{rewritten}" if rewritten else query
+
     def retrieve(self, query: str, top_k: int = TOP_K_RESULTS) -> List[SearchHit]:
         """Поиск стилей; отбрасывает результаты ниже порога MIN_SCORE."""
         hits = self.vectorstore.search(self.embedder.embed_query(query), top_k)
@@ -64,11 +78,7 @@ class RAGPipeline:
         if not self.is_loaded:
             return Answer("База знаний не загружена. Администратор должен выполнить /ingest.")
 
-        # Для уточняющих вопросов («а какой у него IBU?») добавляем прошлый вопрос к поиску
-        search_query = query
-        if history:
-            last_user = next((m["content"] for m in reversed(history) if m["role"] == "user"), "")
-            search_query = f"{last_user}\n{query}" if last_user else query
+        search_query = self.rewrite_query(query, history)
 
         hits = self.retrieve(search_query)
         if not hits:

@@ -20,7 +20,7 @@ if __name__ == "__main__":
     query = " ".join(a for a in args if not a.startswith("--"))
     if not query:
         raise SystemExit(__doc__)
-    config.validate(need_telegram=False, need_llm=not retrieval_only)
+    config.validate(need_telegram=False)
 
     from rag.pipeline import RAGPipeline
 
@@ -29,7 +29,7 @@ if __name__ == "__main__":
         raise SystemExit("Индекс не загружен: сначала python scripts/ingest.py")
     if retrieval_only:
         # top_k расширен, чтобы увидеть score и ниже порога
-        hits = pipe.vectorstore.search(pipe.embedder.embed_query(query), 8)
+        hits = pipe.vectorstore.search(pipe.embedder.embed_query(pipe.rewrite_query(query)), 8)
         for h in hits:
             mark = "✓" if h.score >= config.MIN_SCORE else "✗"
             print(f"{mark} {h.score:.3f}  {h.chunk.source}")
