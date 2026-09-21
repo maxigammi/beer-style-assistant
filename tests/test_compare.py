@@ -32,7 +32,7 @@ def test_styles_without_stats_are_skipped_not_crashing():
 
 def test_groups_by_title_are_complete():
     porters, stouts = assign_groups(["porter", "stout"], CHUNKS)
-    assert codes(porters) == ["13C", "20A", "9C"]
+    assert codes(porters) == ["13C", "20A", "27A", "9C"]  # 27A: Historical Beer: Pre-Prohibition Porter
     assert codes(stouts) == ["15B", "15C", "16A", "16B", "16C", "16D", "20B", "20C"]
 
 
@@ -51,20 +51,21 @@ def test_plural_and_case_and_unknown():
 
 
 def test_aggregates_match_hand_calculation():
-    """Числа сверены вручную по data/styles: 9C 20–40, 13C 18–35, 20A 25–50 (IBU)."""
+    """Числа сверены вручную по data/styles. IBU: 9C 20–40, 13C 18–35, 20A 25–50, 27A (Pre-Prohibition) 20–30."""
     porters = assign_groups(["porter"], CHUNKS)[0]
     ibu = midpoint_mean(porters, "IBU")
-    assert (ibu["min"], ibu["max"], ibu["n"]) == (18, 50, 3)
-    assert abs(ibu["mean"] - (30 + 26.5 + 37.5) / 3) < 1e-9
-    abv = midpoint_mean(porters, "ABV")  # 6.5–9.5, 4–5.4, 4.8–6.5
+    assert (ibu["min"], ibu["max"], ibu["n"]) == (18, 50, 4)
+    assert abs(ibu["mean"] - (30 + 26.5 + 37.5 + 25) / 4) < 1e-9  # 29.75
+    abv = midpoint_mean(porters, "ABV")  # 6.5–9.5, 4–5.4, 4.8–6.5, 4.5–6
     assert (abv["min"], abv["max"]) == (4, 9.5)
+    assert abs(abv["mean"] - (8 + 4.7 + 5.65 + 5.25) / 4) < 1e-9
 
 
 def test_render_facts_is_compact_and_has_no_conclusions():
     porters, stouts = assign_groups(["porter", "stout"], CHUNKS)
     text = render_facts([Group("портеры", "porter", porters), Group("стауты", "stout", stouts)])
-    assert "Портеры — 3 стиля" in text and "Стауты — 8 стилей" in text
-    assert "• Портеры: 18–50, в среднем 31.3" in text
+    assert "Портеры — 4 стиля" in text and "Стауты — 8 стилей" in text
+    assert "• Портеры: 18–50, в среднем 29.8" in text
     assert "• Стауты: 20–90" in text
     for word in ("лучше", "хуже", "рекомендую", "итог", "вывод"):
         assert word not in text.lower()
@@ -95,6 +96,17 @@ def test_meaning_based_group_is_marked():
     wheat = assign_groups(["weissbier"], CHUNKS)[0]
     text = render_facts([Group("вайцены", "weizen", wheat, by_meaning=True), Group("портеры", "porter", assign_groups(["porter"], CHUNKS)[0])])
     assert "в названиях «weizen» не найдено, подобрано по смыслу" in text
+
+
+def test_no_styles_lost_when_several_pages_share_a_code():
+    """Регресс: скрапер хранил стили по коду и терял все страницы 21B и 27A, кроме последней."""
+    specialty_ipas = [c for c in CHUNKS if c.code == "21B"]
+    assert len(specialty_ipas) == 8  # общий Specialty IPA + Belgian, Black, Brown, Brut, Red, Rye, White
+    assert {title_of(c) for c in specialty_ipas} >= {"Specialty IPA: Black IPA", "Specialty IPA: Rye IPA"}
+    assert len([c for c in CHUNKS if c.code == "27A"]) == 9
+    assert len(CHUNKS) == 123  # столько страниц стилей на bjcp.org/style/2021/beer
+    (rye,) = [c for c in CHUNKS if title_of(c) == "Specialty IPA: Rye IPA"]
+    assert parse_stats(rye.text)  # варианты скачаны целиком, со статистикой
 
 
 def test_verify_numbers():

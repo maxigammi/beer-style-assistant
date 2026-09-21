@@ -49,9 +49,13 @@ def to_lines(page: str) -> list[str]:
     return [ln.strip() for ln in page.splitlines() if ln.strip()]
 
 
-def collect_style_urls() -> tuple[dict[str, tuple[str, str]], dict[str, str]]:
-    """({код стиля: (url, номер категории)}, {номер категории: название}) по страницам индекса."""
-    found: dict[str, tuple[str, str]] = {}
+def collect_style_urls() -> tuple[list[tuple[str, str, str]], dict[str, str]]:
+    """
+    ([(код, url, номер категории)], {номер категории: название}) по страницам индекса.
+    Ключ — URL, а не код: у части кодов несколько страниц (21B — Specialty IPA и 7 её вариантов,
+    27A — 9 исторических стилей), и по коду сохранялась бы только последняя.
+    """
+    found: dict[str, tuple[str, str, str]] = {}
     cats: dict[str, str] = {}
     for page in range(1, 12):
         text = get(INDEX.format(page=page))
@@ -59,10 +63,11 @@ def collect_style_urls() -> tuple[dict[str, tuple[str, str]], dict[str, str]]:
         if not matches:
             break
         for url, cat, code in matches:
-            found[code] = (url, cat)
+            found.setdefault(url, (code, url, cat))
         for cat, slug in CATEGORY_URL_RE.findall(text):
             cats[cat] = f"{cat}. {slug.replace('-', ' ').title().replace('Ipa', 'IPA')}"
-    return found, cats
+    ordered = sorted(found.values(), key=lambda t: (int(re.match(r"\d+", t[0]).group()), t[0], t[1]))
+    return ordered, cats
 
 
 def parse_style(url: str) -> dict:
@@ -119,11 +124,10 @@ def render(style: dict, category: str) -> str:
 def main() -> int:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     urls, cat_names = collect_style_urls()
-    print(f"Найдено стилей: {len(urls)}")
+    print(f"Найдено страниц стилей: {len(urls)}")
 
     by_cat: dict[str, list[str]] = {}
-    for code in sorted(urls, key=lambda c: (int(re.match(r"\d+", c).group()), c)):
-        url, cat = urls[code]
+    for code, url, cat in urls:
         print(f"  {code} ...", end=" ", flush=True)
         style = parse_style(url)
         by_cat.setdefault(cat, []).append(render(style, cat_names.get(cat, cat)))

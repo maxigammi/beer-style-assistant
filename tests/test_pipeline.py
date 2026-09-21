@@ -118,7 +118,7 @@ def test_compare_default_has_only_facts_and_one_llm_call():
     llm = StubLLM(COMPARE_JSON)
     ans = make(llm).answer("Чем отличается портер от стаута?")
     assert len(llm.calls) == 1  # только разбор вопроса: текст модель не пишет
-    assert "• Портеры: 18–50, в среднем 31.3" in ans.text and "Характер" not in ans.text
+    assert "• Портеры: 18–50, в среднем 29.8" in ans.text and "Характер" not in ans.text
     assert ans.tokens == 100 and ans.warnings == []
 
 
@@ -140,13 +140,13 @@ def test_compare_uses_code_numbers_and_llm_only_for_traits():
     llm = StubLLM(COMPARE_JSON, traits)
     ans = make(llm).answer("Чем отличается портер от стаута?")
     assert ans.mode == "compare" and ans.used_rag
-    assert "• Портеры: 18–50, в среднем 31.3" in ans.text          # число посчитал код
+    assert "• Портеры: 18–50, в среднем 29.8" in ans.text          # число посчитал код
     assert "Характер по описаниям BJCP" in ans.text and "чёрные, с жареным вкусом" in ans.text
     assert len(llm.calls) == 2                                      # разбор + характеристика, без проверок-повторов
     prompt = llm.calls[1]["messages"][1]["content"]
     assert "Baltic Porter" in prompt and "Imperial Stout" in prompt and "Overall Impression" not in prompt
     assert "IBU" not in prompt  # модель чисел вообще не получает: считать ей нечего
-    assert len(ans.sources) == 11 and ans.warnings == []
+    assert len(ans.sources) == 12 and ans.warnings == []  # 4 портера + 8 стаутов
     assert llm.calls[1]["temperature"] == config.ANSWER_TEMPERATURE
 
 
@@ -211,6 +211,52 @@ def test_single_style_sides_are_named_by_style():
     ans = make(llm).answer("American IPA или Hazy IPA?")
     assert "American IPA — 1 стиль: American IPA (21A)" in ans.text
     assert "• Hazy IPA: 25–60, в среднем 42.5" in ans.text and "Американские" not in ans.text
+
+
+# ---------- обзор семейства ----------
+
+FAMILY_JSON = json.dumps({"intent": "family", "keyword": "IPA"})
+
+
+def test_parse_family_plan():
+    plan = parse_plan(FAMILY_JSON, "расскажи про ипу")
+    assert plan.intent == "family" and plan.keyword == "IPA"
+    assert parse_plan(json.dumps({"intent": "family"}), "q") is None  # без ключа — не разобрано
+
+
+def test_family_lists_every_style_and_asks_no_answer_model():
+    """Регресс: бот писал «представлены три стиля IPA» по топ-4 поиска, а стилей 12."""
+    llm = StubLLM(FAMILY_JSON)
+    ans = make(llm, hits=[hit("21A"), hit("22A"), hit("12C"), hit("21B")]).answer("расскажи про ипу")
+    assert ans.mode == "family" and ans.used_rag
+    assert len(llm.calls) == 1  # только разбор вопроса: список собрал код, а не модель
+    from rag.compare import assign_groups
+    expected = assign_groups(["IPA"], CHUNKS)[0]
+    assert f"есть {len(expected)} стилей" in ans.text and len(expected) == 12
+    for code in ("12C", "21A", "21C", "22A"):
+        assert f"({code})" in ans.text
+    for variant in ("Belgian", "Black", "Brown", "Brut", "Red", "Rye", "White"):
+        assert f"Specialty IPA: {variant} IPA (21B)" in ans.text  # именно их бот «забыл»
+    assert "• Hazy IPA (21C) — IBU 25–60, ABV 6–9%" in ans.text  # числа из данных
+    assert len(ans.sources) == 12
+
+
+def test_family_with_a_single_matching_style_falls_back_to_lookup():
+    llm = StubLLM(json.dumps({"intent": "family", "keyword": "American IPA"}), "Горечь American IPA — 40–70 IBU.")
+    ans = make(llm, hits=[hit("21A", 0.6)]).answer("расскажи про American IPA")
+    assert ans.mode == "lookup" and "40–70" in ans.text and len(llm.calls) == 2
+
+
+def test_family_with_unknown_keyword_falls_back_to_lookup():
+    llm = StubLLM(json.dumps({"intent": "family", "keyword": "xyzzy"}), "В базе знаний BJCP нет информации об этом.")
+    ans = make(llm, hits=[hit("21A", 0.6)]).answer("расскажи про xyzzy")
+    assert ans.mode == "lookup" and len(llm.calls) == 2
+
+
+def test_long_family_list_is_capped():
+    from rag.compare import render_family
+    text = render_family("ale", CHUNKS[:40], limit=25)
+    assert text.count("\n• ") == 25 and "…и ещё 15" in text
 
 
 # ---------- справка: проверка чисел ----------

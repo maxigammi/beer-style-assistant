@@ -140,3 +140,23 @@ def render_facts(groups: Sequence[Group], list_up_to: int = 8) -> str:
     lines += ["", "«В среднем» — среднее из середин диапазонов стилей группы. "
                   "Группа — все стили BJCP, в названии которых есть указанное слово."]
     return "\n".join(lines)
+
+
+def render_family(keyword: str, chunks: Sequence[Chunk], limit: int = 25) -> str:
+    """
+    Обзор семейства кодом, без модели: полный список стилей с ключевыми числами.
+    Модель на «расскажи про IPA» видела бы только топ-N найденных и выдавала их за весь список.
+    """
+    lines = [f"В базе нет общего описания «{keyword}», но есть {_plural_styles(len(chunks))}:", ""]
+    for c in list(chunks)[:limit]:
+        stats = parse_stats(c.text)
+        parts = []
+        if "IBU" in stats:
+            parts.append(f"IBU {_num(stats['IBU'][0])}–{_num(stats['IBU'][1])}")
+        if "ABV" in stats:
+            parts.append(f"ABV {_num(stats['ABV'][0])}–{_num(stats['ABV'][1])}%")
+        lines.append(f"• {title_of(c)} ({c.code})" + (f" — {', '.join(parts)}" if parts else ""))
+    if len(chunks) > limit:
+        lines.append(f"…и ещё {len(chunks) - limit}")
+    lines += ["", "Спроси про любой из них, и я расскажу подробнее."]
+    return "\n".join(lines)

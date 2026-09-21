@@ -18,12 +18,12 @@ from typing import Dict, List, Optional, Tuple
 
 import config
 from config import (
-    ANSWER_TEMPERATURE, EMBED_MODEL, GROUP_FALLBACK_MIN_SCORE, GROUP_FALLBACK_TOP_K, LIST_STYLES_UP_TO,
+    ANSWER_TEMPERATURE, EMBED_MODEL, FAMILY_LIST_LIMIT, GROUP_FALLBACK_MIN_SCORE, GROUP_FALLBACK_TOP_K, LIST_STYLES_UP_TO,
     MAX_CONTEXT_CHARS, MIN_SCORE, NO_CONTEXT_REPLY, RAG_PROMPT_TEMPLATE, STYLES_DIR, SYSTEM_PROMPT,
     TOP_K_RESULTS, TRAITS_MAX_STYLES, TRAITS_PROMPT, UNDERSTAND_PROMPT,
 )
 from llm.gigachat import GigaChatClient, GigaChatError
-from rag.compare import Group, assign_groups, overall_impression, render_facts, title_of
+from rag.compare import Group, assign_groups, overall_impression, render_facts, render_family, title_of
 from rag.embedder import OpenAIEmbedder
 from rag.loader import load_styles
 from rag.vectorstore import FAISSVectorStore, SearchHit
@@ -47,9 +47,10 @@ class Answer:
 
 @dataclass
 class Plan:
-    intent: str                       # lookup | compare
+    intent: str                       # lookup | compare | family
     query: str = ""                   # lookup: строка для эмбеддинга
     groups: List[Tuple[str, str]] = field(default_factory=list)  # compare: (label, keyword)
+    keyword: str = ""                 # family: слово из названий стилей
     tokens: int = 0
 
 
@@ -72,6 +73,9 @@ def parse_plan(raw: str, user_query: str) -> Optional[Plan]:
         if len(groups) >= 2 and len(keywords) == len(groups):
             return Plan("compare", groups=groups)
         return None  # одна сторона или дубли — это не сравнение
+    if data.get("intent") == "family":
+        keyword = str(data.get("keyword", "")).strip()
+        return Plan("family", keyword=keyword) if keyword else None
     english = str(data.get("query", "")).strip()
     if english:
         # Исходный текст оставляем: в нём могут быть названия марок и стилей как есть
@@ -123,7 +127,7 @@ class RAGPipeline:
             logger.warning(f"Не разобрал ответ модели, ищем по исходному вопросу: {result.text!r}")
             plan = Plan("lookup", query=query)
         plan.tokens = result.tokens
-        logger.info(f"Вопрос {query!r} -> {plan.intent}: {plan.groups or plan.query!r}")
+        logger.info(f"Вопрос {query!r} -> {plan.intent}: {plan.groups or plan.keyword or plan.query!r}")
         return plan
 
     # ---------- поиск ----------
@@ -160,7 +164,22 @@ class RAGPipeline:
         plan = self.understand(query, history)
         if plan.intent == "compare":
             return self._answer_compare(plan)
+        if plan.intent == "family":
+            answer = self._answer_family(plan)
+            if answer is not None:
+                return answer
+            # Меньше двух стилей с таким словом в названии — это обычная справка
+            plan = Plan("lookup", query=f"{query}\n{plan.keyword} beer style", tokens=plan.tokens)
         return self._answer_lookup(query, plan, history)
+
+    def _answer_family(self, plan: Plan) -> Optional[Answer]:
+        """Полный список стилей семейства (по названию), без участия модели. None — не семейство."""
+        (chunks,) = assign_groups([plan.keyword], self.vectorstore.chunks)
+        if len(chunks) < 2:
+            return None
+        logger.info(f"Семейство {plan.keyword!r}: {len(chunks)} стилей")
+        return Answer(render_family(plan.keyword, chunks, FAMILY_LIST_LIMIT),
+                      sources=[c.source for c in chunks], used_rag=True, tokens=plan.tokens, mode="family")
 
     def _answer_lookup(self, query: str, plan: Plan, history) -> Answer:
         hits = self.retrieve(plan.query)
