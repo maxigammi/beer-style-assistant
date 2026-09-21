@@ -74,3 +74,6 @@ dmypy.json
 data/index/
 data/access.db*
 assets/avatar_preview.png
+
+# Личные материалы (отчёт по домашнему заданию)
+report/
