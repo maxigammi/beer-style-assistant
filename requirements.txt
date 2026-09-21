@@ -1,0 +1,7 @@
+aiogram>=3.0.0
+openai>=1.0.0
+faiss-cpu>=1.7.0
+numpy
+python-dotenv
+requests
+truststore

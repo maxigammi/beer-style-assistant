@@ -66,3 +66,9 @@ htmlcov/
 .dmypy.json
 dmypy.json
 
+
+# Windows download artifacts
+*:Zone.Identifier
+
+# Индекс и локальные данные
+data/index/
