@@ -126,10 +126,16 @@ def fmt_date(ts: int) -> str:
     return datetime.fromtimestamp(ts).strftime("%d.%m.%Y %H:%M")
 
 
-def format_answer(answer) -> str:
+def show_debug_info(user_id: int) -> bool:
+    """Источники и служебная строка нужны для отладки, обычным пользователям их не показываем."""
+    return config.SHOW_SOURCES == "all" or (config.SHOW_SOURCES == "admin" and is_admin(user_id))
+
+
+def format_answer(answer, debug: bool = False) -> str:
     text = answer.text
-    if answer.sources:
-        text += "\n\nИсточники: " + "; ".join(answer.sources)
+    if debug and answer.sources:
+        text += ("\n\n— отладка —\nИсточники: " + "; ".join(answer.sources)
+                 + f"\nscore {answer.top_score:.3f} · токены {answer.tokens}")
     return text
 
 
@@ -152,7 +158,7 @@ async def ask(message: Message, query: str) -> None:
                              {"role": "assistant", "content": answer.text}]
             del user_history[:-config.MAX_HISTORY_PAIRS * 2]
         await status.delete()
-        await send_long(message, format_answer(answer))
+        await send_long(message, format_answer(answer, debug=show_debug_info(user_id)))
     except Exception:
         logger.exception("Ошибка при обработке вопроса")
         await status.delete()

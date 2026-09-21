@@ -344,6 +344,26 @@ async def smalltalk_in_bot():
     assert "Администратор" in last_to(session, ADMIN) and "/invite" in last_to(session, ADMIN)
 
 
+async def sources_visibility():
+    import config
+    session = new_world()
+    botmod.access.redeem(botmod.access.create_invite(ADMIN, 7), STRANGER)
+
+    def shown(user_id):
+        return "Источники" in last_to(session, user_id)
+
+    for mode, admin_sees, user_sees in (("admin", True, False), ("off", False, False), ("all", True, True)):
+        config.SHOW_SOURCES = mode
+        await say(ADMIN, "какая горечь у IPA?")
+        await say(STRANGER, "какая горечь у IPA?")
+        assert (shown(ADMIN), shown(STRANGER)) == (admin_sees, user_sees), mode
+    config.SHOW_SOURCES = "admin"
+    await say(ADMIN, "какая горечь у IPA?")
+    assert "score 0.900" in last_to(session, ADMIN) and "токены 1234" in last_to(session, ADMIN)
+    await say(STRANGER, "какая горечь у IPA?")
+    assert "score" not in last_to(session, STRANGER) and "BJCP 21A" not in last_to(session, STRANGER)
+
+
 def _run(coro):
     asyncio.run(coro)
 
@@ -366,6 +386,10 @@ def test_user_buttons():
 
 def test_invite_buttons():
     _run(invite_buttons())
+
+
+def test_sources_visibility():
+    _run(sources_visibility())
 
 
 def test_smalltalk_in_bot():

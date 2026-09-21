@@ -59,6 +59,11 @@ TOP_K_RESULTS = 4
 # Значение подбирается экспериментально (scripts/try_query.py показывает score).
 MIN_SCORE = float(os.getenv("MIN_SCORE", "0.25"))
 MAX_CONTEXT_CHARS = 12000
+# Кому показывать источники и отладочную строку (score, токены): off — никому,
+# admin — только администраторам (по умолчанию), all — всем. Для продакшена: admin или off.
+SHOW_SOURCES = os.getenv("SHOW_SOURCES", "admin").strip().lower()
+if SHOW_SOURCES not in ("off", "admin", "all"):
+    raise SystemExit(f"SHOW_SOURCES должен быть off, admin или all, а не {SHOW_SOURCES!r}")
 MAX_HISTORY_PAIRS = 6
 
 # ========== ПРОМПТЫ ==========
