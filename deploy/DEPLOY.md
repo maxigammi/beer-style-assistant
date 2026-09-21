@@ -317,7 +317,12 @@ E
 8. **Секреты**: `env_file: .env`. Файл `.env` кладёт человек уже готовым; не собирать его из `.env` других
    проектов, даже своих. Про общий ключ GigaChat решение уже принято человеком (см. шаг 0), он положит его
    в готовый `.env` сам.
-9. **Один экземпляр** и один токен: `docker compose up -d`, не `run bot`. Разовые команды
+9. **Каталог кода должен принадлежать пользователю процесса** (`COPY --chown=beerbot:beerbot app/ /app/`, после
+   `useradd`). Иначе `COPY` от root оставит `/app` недоступным на запись. Бот пишет лог-файл `bot.log` рядом с кодом;
+   если писать нельзя, он теперь не падает, а работает только с выводом в stdout и пишет предупреждение
+   «Лог-файл … недоступен для записи». В Docker файл не нужен (есть `docker logs`): можно отключить
+   `ENV LOG_FILE=` (пусто) в Dockerfile. Первая сборка на VPS упала именно на этом.
+10. **Один экземпляр** и один токен: `docker compose up -d`, не `run bot`. Разовые команды
    (`ingest`, `preflight`, тесты) идут через `docker compose run --rm bot <команда>`.
 
 ### Эталонные заготовки
@@ -330,7 +335,7 @@ RUN update-ca-certificates && useradd --system --uid ${UID} --create-home beerbo
 WORKDIR /app
 COPY app/requirements.lock .
 RUN pip install --no-cache-dir -r requirements.lock
-COPY app/ /app/
+COPY --chown=beerbot:beerbot app/ /app/
 ENV STATE_DIR=/state PYTHONUNBUFFERED=1 TZ=Europe/Moscow
 USER beerbot
 CMD ["python", "bot.py"]
@@ -361,8 +366,9 @@ export BOT_UID=$(id -u)
 docker compose build
 # 1. Проверка окружения ВНУТРИ контейнера: сертификат, сеть, ключи (значения не печатает), запись в state
 docker compose run --rm bot python scripts/preflight.py
-# 2. Офлайн-тесты внутри образа (без ключей и сети)
-docker compose run --rm bot sh -c 'for t in test_access test_compare test_pipeline test_gigachat test_config_preflight; do python tests/$t.py || exit 1; done'
+# 2. Офлайн-тесты внутри образа (без ключей и сети). test_bot_access и test_logging импортируют bot.py,
+#    то есть ловят ошибки старта до запуска (в том числе права на каталог кода)
+docker compose run --rm bot sh -c 'for t in test_access test_smalltalk test_compare test_pipeline test_gigachat test_config_preflight test_logging test_bot_access; do python tests/$t.py || exit 1; done'
 # 3. Индекс (нужен OPENAI_API_KEY; ожидаемо «Проиндексировано стилей: 123»)
 docker compose run --rm bot python scripts/ingest.py
 # 4. Запуск и проверка
