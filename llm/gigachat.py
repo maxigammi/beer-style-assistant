@@ -15,7 +15,7 @@ from typing import Dict, List, Optional
 import requests
 
 from config import (
-    GIGACHAT_API_URL, GIGACHAT_AUTH_KEY, GIGACHAT_CA_BUNDLE, GIGACHAT_MODEL,
+    GIGACHAT_API_URL, GIGACHAT_AUTH_KEY, GIGACHAT_MODEL,
     GIGACHAT_OAUTH_URL, GIGACHAT_SCOPE, REQUEST_TIMEOUT,
 )
 
@@ -42,8 +42,6 @@ class GigaChatClient:
         self._token_expires: float = 0.0
         self._token_lock = threading.Lock()
         self._chat_lock = threading.Lock()
-        # verify: путь к PEM, если задан; иначе системное хранилище (truststore) / certifi
-        self._verify = GIGACHAT_CA_BUNDLE or True
 
     def _get_token(self, force: bool = False) -> str:
         with self._token_lock:
@@ -58,7 +56,6 @@ class GigaChatClient:
                 },
                 data={"scope": GIGACHAT_SCOPE},
                 timeout=REQUEST_TIMEOUT,
-                verify=self._verify,
             )
             if resp.status_code != 200:
                 raise GigaChatError(f"OAuth: HTTP {resp.status_code} {resp.text[:200]}")
@@ -89,8 +86,7 @@ class GigaChatClient:
                     headers={"Authorization": f"Bearer {self._get_token(force=refresh)}"},
                     json=payload,
                     timeout=REQUEST_TIMEOUT,
-                    verify=self._verify,
-                )
+                    )
                 if resp.status_code == 200:
                     data = resp.json()
                     usage = data.get("usage", {})
