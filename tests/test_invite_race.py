@@ -22,9 +22,9 @@ def redeem_worker(args):
     return AccessStore(Path(db_path)).redeem(code, user_id)
 
 
-def run(max_uses: int, users: list[int]) -> Counter:
+def run(users: list[int]) -> Counter:
     db_path = Path(tempfile.mkdtemp()) / "access.db"
-    code = AccessStore(db_path).create_invite(created_by=1, max_uses=max_uses)
+    code = AccessStore(db_path).create_invite(created_by=1)
     ctx = multiprocessing.get_context("spawn")
     with ctx.Pool(WORKERS) as pool:
         results = Counter(pool.map(redeem_worker, [(str(db_path), code, u) for u in users], chunksize=1))
@@ -34,19 +34,13 @@ def run(max_uses: int, users: list[int]) -> Counter:
 
 
 def test_single_use_code_has_exactly_one_winner():
-    results = run(max_uses=1, users=list(range(100, 100 + WORKERS)))
+    results = run(users=list(range(100, 100 + WORKERS)))
     assert results["ok"] == 1, results
     assert results["used_up"] == WORKERS - 1, results
 
 
-def test_limited_multi_use_code_never_oversold():
-    results = run(max_uses=3, users=list(range(100, 100 + WORKERS)))
-    assert results["ok"] == 3, results
-    assert results["used_up"] == WORKERS - 3, results
-
-
 def test_same_user_racing_with_himself_joins_once():
-    results = run(max_uses=5, users=[42] * WORKERS)
+    results = run(users=[42] * WORKERS)
     assert results["ok"] == 1, results
     assert results["already"] == WORKERS - 1, results  # лишние клики не тратят инвайт
 
@@ -54,7 +48,5 @@ def test_same_user_racing_with_himself_joins_once():
 if __name__ == "__main__":
     test_single_use_code_has_exactly_one_winner()
     print("ok  один победитель из", WORKERS)
-    test_limited_multi_use_code_never_oversold()
-    print("ok  лимит многоразового кода не превышен")
     test_same_user_racing_with_himself_joins_once()
     print("ok  один пользователь не дублируется")

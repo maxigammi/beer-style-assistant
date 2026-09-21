@@ -65,8 +65,6 @@ FAILURES = ("not_found", "used_up", "expired", "revoked", "blocked", "busy")
 class Invite:
     code: str
     expires_at: int
-    max_uses: int
-    uses: int
     note: str
 
 
@@ -115,12 +113,13 @@ class AccessStore:
 
     # ---------- инвайты ----------
 
-    def create_invite(self, created_by: int, max_uses: int = 1, days: int = 7, note: str = "") -> str:
+    def create_invite(self, created_by: int, days: int = 7, note: str = "") -> str:
+        """Один инвайт — один вход одного пользователя (max_uses в схеме всегда 1)."""
         code = secrets.token_urlsafe(8)  # ~64 бита; символы безопасны для deep link
         now = int(time.time())
         self.db.execute(
             "INSERT INTO invites (code, created_by, created_at, expires_at, max_uses, note) VALUES (?,?,?,?,?,?)",
-            (code, created_by, now, now + days * DAY, max_uses, note),
+            (code, created_by, now, now + days * DAY, 1, note),
         )
         return code
 
@@ -128,6 +127,7 @@ class AccessStore:
         """
         Гасит инвайт. Возвращает OK, ALREADY (уже участник — инвайт не тратится,
         чтобы админ мог проверить собственную ссылку) либо причину отказа из FAILURES.
+        Заблокированному инвайт тоже не тратится: его можно выдать другому.
         """
         now = int(time.time())
         try:
@@ -170,7 +170,7 @@ class AccessStore:
 
     def active_invites(self) -> List[Invite]:
         rows = self.db.execute(
-            "SELECT code, expires_at, max_uses, uses, note FROM invites "
+            "SELECT code, expires_at, note FROM invites "
             "WHERE revoked = 0 AND uses < max_uses AND expires_at > ? ORDER BY created_at",
             (int(time.time()),),
         ).fetchall()
@@ -202,8 +202,8 @@ class AccessStore:
 
     def block_user(self, user_id: int) -> bool:
         """
-        Блокирует, а не удаляет: иначе исключённый мог бы вернуться по многоразовому
-        инвайту, в котором ещё остались использования.
+        Блокирует, а не удаляет: заблокированный не сможет вернуться по новому инвайту,
+        пока админ не сделает /unblock.
         """
         cur = self.db.execute("UPDATE users SET blocked = 1 WHERE user_id = ? AND blocked = 0", (user_id,))
         return cur.rowcount == 1

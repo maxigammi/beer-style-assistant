@@ -18,8 +18,9 @@ os.environ.setdefault("TELEGRAM_TOKEN", "123456:TEST")
 
 from aiogram import Bot  # noqa: E402
 from aiogram.client.session.base import BaseSession  # noqa: E402
-from aiogram.methods import GetMe, SendMessage  # noqa: E402
-from aiogram.types import Chat, Message, Update, User  # noqa: E402
+from aiogram.exceptions import TelegramBadRequest  # noqa: E402
+from aiogram.methods import GetChat, GetMe, SendMessage  # noqa: E402
+from aiogram.types import Chat, ChatFullInfo, Message, Update, User  # noqa: E402
 
 import bot as botmod  # noqa: E402
 import config  # noqa: E402
@@ -38,6 +39,11 @@ class RecordingSession(BaseSession):
             self.sent.append((method.chat_id, method.text))
             return Message(message_id=len(self.sent), date=datetime.now(),
                            chat=Chat(id=method.chat_id, type="private"), text=method.text).as_(bot)
+        if isinstance(method, GetChat):
+            if method.chat_id != STRANGER:  # Telegram знает только тех, кто писал боту
+                raise TelegramBadRequest(method=method, message="Bad Request: chat not found")
+            return ChatFullInfo.model_construct(id=STRANGER, type="private", first_name="Василий",
+                                                last_name="Пупкин", username="vasya")
         if isinstance(method, GetMe):
             return User(id=999, is_bot=True, first_name="beer", username="beer_test_bot")
         return True  # delete_message и прочее
@@ -89,7 +95,7 @@ async def scenario():
     assert botmod.pipeline.calls == 0
 
     # 3. Админ создаёт инвайт
-    await say(ADMIN, "/invite 1 7 Вася с работы")
+    await say(ADMIN, "/invite 7 Вася с работы")
     reply = last_to(session, ADMIN)
     assert "Вася с работы" in reply
     code = re.search(r"Код: (\S+)", reply).group(1)
@@ -143,12 +149,13 @@ async def scenario():
     await say(ADMIN, "какая горечь у IPA?")
     assert botmod.pipeline.calls == calls + 1
 
-    # 11. Заблокированный не возвращается по многоразовому коду; /unblock возвращает
-    await say(ADMIN, "/invite 5 7")
-    multi = re.search(r"Код: (\S+)", last_to(session, ADMIN)).group(1)
-    await say(STRANGER, f"/start {multi}")  # STRANGER заблокирован ещё в п. 8
+    # 11. Заблокированный не входит даже по свежему инвайту (и инвайт не сгорает); /unblock возвращает
+    await say(ADMIN, "/invite 7 Для Пети")
+    fresh = re.search(r"Код: (\S+)", last_to(session, ADMIN)).group(1)
+    await say(STRANGER, f"/start {fresh}")  # STRANGER заблокирован ещё в п. 8
     assert "недействителен" in last_to(session, STRANGER)
     assert "blocked" in last_to(session, ADMIN)
+    assert botmod.access.redeem(fresh, 77) == "ok"  # тот же инвайт спокойно достаётся другому
     await say(STRANGER, "вопрос")
     assert "по приглашениям" in last_to(session, STRANGER)
     await say(ADMIN, f"/unblock {STRANGER}")
@@ -162,16 +169,28 @@ async def scenario():
     assert f"{STRANGER} — Вася с работы" in users_view  # заметка вместо ника
     assert "vasya" not in users_view
     await say(ADMIN, "/revoke all")
-    assert "Отозвано инвайтов: 1" in last_to(session, ADMIN)
+    assert "Отозвано инвайтов: 0" in last_to(session, ADMIN)  # «Для Пети» уже использован в п. 11
 
-    # 13. Форматы /invite: только заметка, только числа, мусор
+    # 13. Форматы /invite: только заметка, только срок, мусор
     await say(ADMIN, "/invite Маша")
-    assert "на 1 чел., действует 7 дн." in last_to(session, ADMIN) and "Маша" in last_to(session, ADMIN)
-    await say(ADMIN, "/invite 3")
-    assert "на 3 чел., действует 7 дн." in last_to(session, ADMIN)
-    await say(ADMIN, "/invite 0 7")
+    assert "действует 7 дн." in last_to(session, ADMIN) and "Маша" in last_to(session, ADMIN)
+    await say(ADMIN, "/invite 30")
+    assert "действует 30 дн." in last_to(session, ADMIN)
+    await say(ADMIN, "/invite 0")
     assert "Формат" in last_to(session, ADMIN)
-    assert botmod.access.db.execute("SELECT COUNT(*) FROM users WHERE user_id = 1").fetchone()[0] == 0
+    await say(ADMIN, "/revoke all")
+    assert "Отозвано инвайтов: 2" in last_to(session, ADMIN)
+
+    # 14. /whois: имя и ник берутся у Telegram на лету; для неизвестного ID — понятная ошибка
+    await say(ADMIN, f"/whois {STRANGER}")
+    who = last_to(session, ADMIN)
+    assert "@vasya" in who and "Василий Пупкин" in who and "Вася с работы" in who
+    await say(ADMIN, "/whois 555")
+    assert "не отдаёт данные" in last_to(session, ADMIN)
+    await say(STRANGER, "/whois 2")
+    assert "только администратору" in last_to(session, STRANGER)
+    cols = {r[1] for r in botmod.access.db.execute("PRAGMA table_info(users)")}
+    assert "username" not in cols  # /whois ничего не сохраняет
 
 
 def test_access_flow():
@@ -180,4 +199,4 @@ def test_access_flow():
 
 if __name__ == "__main__":
     test_access_flow()
-    print("ok  test_access_flow: 13 сценариев пройдено")
+    print("ok  test_access_flow: 14 сценариев пройдено")

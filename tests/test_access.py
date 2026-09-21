@@ -24,24 +24,18 @@ def test_redeem_ok_and_membership():
 
 def test_single_use_invite_is_consumed():
     s = make_store()
-    code = s.create_invite(1, max_uses=1)
+    code = s.create_invite(1)
     assert s.redeem(code, 10) == "ok"
     assert s.redeem(code, 11) == "used_up"
     assert not s.is_member(11)
 
 
-def test_multi_use_invite():
+def test_member_redeeming_again_is_harmless():
     s = make_store()
-    code = s.create_invite(1, max_uses=2)
-    assert [s.redeem(code, u) for u in (10, 11, 12)] == ["ok", "ok", "used_up"]
-
-
-def test_member_redeeming_again_does_not_burn_a_use():
-    s = make_store()
-    code = s.create_invite(1, max_uses=2)
+    code = s.create_invite(1)
     assert s.redeem(code, 10) == "ok"
     assert s.redeem(code, 10) == "already"
-    assert s.redeem(code, 11) == "ok"
+    assert s.redeem(code, 11) == "used_up"  # код принадлежит первому вошедшему, а не гуляет по рукам
 
 
 def test_unknown_code_is_invalid():
@@ -69,24 +63,23 @@ def test_revoked_invite_is_invalid():
 
 def test_block_cuts_access_and_blocks_rejoin():
     s = make_store()
-    code = s.create_invite(1, max_uses=5)
-    s.redeem(code, 10)
+    s.redeem(s.create_invite(1), 10)
     assert s.block_user(10)
     assert not s.is_member(10)
     assert not s.block_user(10)
-    # главное: исключённый не возвращается по тому же многоразовому коду
-    assert s.redeem(code, 10) == "blocked"
+    # даже со свежим инвайтом заблокированный не входит, пока админ не разблокирует
+    assert s.redeem(s.create_invite(1), 10) == "blocked"
     assert not s.is_member(10)
     assert s.unblock_user(10) and s.is_member(10)
 
 
 def test_blocked_attempt_does_not_burn_invite():
     s = make_store()
-    code = s.create_invite(1, max_uses=1)
+    code = s.create_invite(1)
     s.redeem(s.create_invite(1), 10)
     s.block_user(10)
     assert s.redeem(code, 10) == "blocked"
-    assert s.redeem(code, 11) == "ok"
+    assert s.redeem(code, 11) == "ok"  # инвайт не сгорел: его можно отдать другому
 
 
 def test_revoke_all():

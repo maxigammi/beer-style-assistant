@@ -13,6 +13,7 @@ from datetime import datetime
 from typing import Dict, List
 
 from aiogram import BaseMiddleware, Bot, Dispatcher, F
+from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 
@@ -161,9 +162,9 @@ async def cmd_start(message: Message, command: CommandObject):
 
 ADMIN_HELP = (
     "\n\nАдминистратор:\n"
-    "/invite [чел=1] [дней=7] [заметка] — создать инвайт\n"
+    "/invite [дней=7] [заметка] — создать инвайт (один инвайт — один человек)\n"
     "/invites — действующие инвайты, /revoke КОД|all — отозвать\n"
-    "/users — список пользователей, /kick ID — заблокировать, /unblock ID — вернуть\n"
+    "/users — список, /whois ID — кто это, /kick ID — заблокировать, /unblock ID — вернуть\n"
     "/ingest — переиндексация базы"
 )
 
@@ -206,20 +207,17 @@ def admin_only(handler):
 @dp.message(Command("invite"))
 @admin_only
 async def cmd_invite(message: Message, command: CommandObject):
-    """/invite [чел=1] [дней=7] [заметка]"""
+    """/invite [дней=7] [заметка]. Один инвайт — один вход одного пользователя."""
     words = (command.args or "").split()
-    numbers = []
-    while words and len(numbers) < 2 and words[0].isdigit():
-        numbers.append(int(words.pop(0)))
-    uses, days = (numbers + [1, 7][len(numbers):])[:2]
+    days = int(words.pop(0)) if words and words[0].isdigit() else 7
     note = " ".join(words)[:MAX_NOTE_LEN]
-    if not (1 <= uses <= 100 and 1 <= days <= 90):
-        await message.answer("Формат: /invite [сколько человек: 1–100] [срок в днях: 1–90] [заметка]\n"
-                             "Например: /invite 1 7 Вася с работы")
+    if not 1 <= days <= 90:
+        await message.answer("Формат: /invite [срок в днях: 1–90] [заметка]\n"
+                             "Например: /invite 7 Вася с работы")
         return
-    code = access.create_invite(message.from_user.id, uses, days, note)
+    code = access.create_invite(message.from_user.id, days, note)
     await message.answer(
-        f"Инвайт создан: на {uses} чел., действует {days} дн."
+        f"Инвайт создан: на одного человека, действует {days} дн."
         + (f"\nЗаметка: {note}" if note else "")
         + f"\n\nСсылка: https://t.me/{bot_username}?start={code}\n"
         f"Код: {code}"
@@ -233,8 +231,7 @@ async def cmd_invites(message: Message):
     if not items:
         await message.answer("Действующих инвайтов нет. Создать: /invite")
         return
-    lines = [f"{i.code} — использовано {i.uses}/{i.max_uses}, до {fmt_date(i.expires_at)}"
-             + (f" — {i.note}" if i.note else "") for i in items]
+    lines = [f"{i.code} — до {fmt_date(i.expires_at)}" + (f" — {i.note}" if i.note else "") for i in items]
     await message.answer("Действующие инвайты:\n" + "\n".join(lines) + "\n\nОтозвать: /revoke КОД")
 
 
@@ -262,7 +259,30 @@ async def cmd_users(message: Message):
     lines = [f"{'⛔ ' if u.blocked else ''}{u.user_id}" + (f" — {u.note}" if u.note else "")
              + f" (с {fmt_date(u.joined_at)})" for u in users]
     await message.answer(f"Пользователи ({len(users)}):\n" + "\n".join(lines)
-                         + "\n\nЗаблокировать: /kick ID, вернуть: /unblock ID")
+                         + "\n\nКто это: /whois ID, заблокировать: /kick ID, вернуть: /unblock ID")
+
+
+@dp.message(Command("whois"))
+@admin_only
+async def cmd_whois(message: Message, command: CommandObject):
+    """Ник и имя по ID берутся у Telegram в момент запроса и нигде не сохраняются."""
+    arg = (command.args or "").strip()
+    if not arg.isdigit():
+        await message.answer("Формат: /whois ID (список: /users)")
+        return
+    user_id = int(arg)
+    try:
+        chat = await bot.get_chat(user_id)
+    except TelegramAPIError:
+        await message.answer("Telegram не отдаёт данные по этому ID: человек ещё не писал боту "
+                             "или заблокировал его.")
+        return
+    name = " ".join(x for x in (chat.first_name, chat.last_name) if x) or "—"
+    note = access.note_of(user_id)
+    await message.answer(
+        f"ID: {user_id}\nUsername: {'@' + chat.username if chat.username else '—'}\nИмя: {name}"
+        + (f"\nЗаметка: {note}" if note else "")
+    )
 
 
 @dp.message(Command("kick"))
