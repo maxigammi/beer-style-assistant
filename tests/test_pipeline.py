@@ -12,7 +12,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import config  # noqa: E402
-from llm.gigachat import ChatResult, GigaChatError  # noqa: E402
+from llm.gigachat import ChatResult, GigaChatBusy, GigaChatError  # noqa: E402
 from rag.loader import load_styles  # noqa: E402
 from rag.pipeline import RAGPipeline, parse_plan  # noqa: E402
 from rag.vectorstore import SearchHit  # noqa: E402
@@ -296,6 +296,20 @@ def test_lookup_without_relevant_styles_does_not_call_llm_for_answer():
     ans = make(llm, hits=[hit("1A", 0.05)]).answer("Как приготовить борщ?")
     assert ans.text == config.NO_CONTEXT_REPLY and not ans.used_rag
     assert len(llm.calls) == 1
+
+
+def test_busy_key_on_understanding_stops_immediately_with_a_clear_message():
+    """Ключ занят надолго: второй раз ждать те же 45 с ради ответа бессмысленно."""
+    llm = StubLLM(GigaChatBusy("занят"))
+    ans = make(llm, hits=[hit("21A")]).answer("Какая горечь у American IPA?")
+    assert ans.text == config.BUSY_REPLY and not ans.used_rag
+    assert len(llm.calls) == 1
+
+
+def test_busy_key_on_the_answer_gives_the_same_message():
+    llm = StubLLM(LOOKUP_JSON, GigaChatBusy("занят"))
+    ans = make(llm, hits=[hit("21A")]).answer("Какая горечь у American IPA?")
+    assert ans.text == config.BUSY_REPLY and "Не получилось" not in ans.text
 
 
 def test_llm_failure_gives_friendly_message():

@@ -18,11 +18,11 @@ from typing import Dict, List, Optional, Tuple
 
 import config
 from config import (
-    ANSWER_TEMPERATURE, EMBED_MODEL, FAMILY_LIST_LIMIT, GROUP_FALLBACK_MIN_SCORE, GROUP_FALLBACK_TOP_K, LIST_STYLES_UP_TO,
+    ANSWER_TEMPERATURE, BUSY_REPLY, EMBED_MODEL, FAMILY_LIST_LIMIT, GROUP_FALLBACK_MIN_SCORE, GROUP_FALLBACK_TOP_K, LIST_STYLES_UP_TO,
     MAX_CONTEXT_CHARS, MIN_SCORE, NO_CONTEXT_REPLY, RAG_PROMPT_TEMPLATE, STYLES_DIR, SYSTEM_PROMPT,
     TOP_K_RESULTS, TRAITS_MAX_STYLES, TRAITS_PROMPT, UNDERSTAND_PROMPT,
 )
-from llm.gigachat import GigaChatClient, GigaChatError
+from llm.gigachat import GigaChatBusy, GigaChatClient, GigaChatError
 from rag.compare import Group, assign_groups, overall_impression, render_facts, render_family, title_of
 from rag.embedder import OpenAIEmbedder
 from rag.loader import load_styles
@@ -119,6 +119,8 @@ class RAGPipeline:
         messages.append({"role": "user", "content": query})
         try:
             result = self.llm.chat_ex(messages, temperature=0.0, max_tokens=200)
+        except GigaChatBusy:
+            raise  # ключ занят надолго: не тратить ещё столько же на ответ, сразу сказать об этом
         except GigaChatError as e:
             logger.warning(f"Разбор вопроса не удался, ищем по исходному: {e}")
             return Plan("lookup", query=query)
@@ -161,7 +163,11 @@ class RAGPipeline:
     def answer(self, query: str, history: Optional[List[Dict[str, str]]] = None) -> Answer:
         if not self.is_loaded:
             return Answer("База знаний не загружена. Администратор должен выполнить /ingest.")
-        plan = self.understand(query, history)
+        try:
+            plan = self.understand(query, history)
+        except GigaChatBusy as e:
+            logger.warning(str(e))
+            return Answer(BUSY_REPLY)
         if plan.intent == "compare":
             return self._answer_compare(plan)
         if plan.intent == "family":
@@ -214,6 +220,9 @@ class RAGPipeline:
                 if bad:
                     logger.warning(f"После исправления остались числа не из контекста: {bad}")
                     warnings.append(f"числа не из контекста: {', '.join(bad)}")
+        except GigaChatBusy as e:
+            logger.warning(str(e))
+            return Answer(BUSY_REPLY, tokens=plan.tokens)
         except GigaChatError as e:
             logger.error(f"Ошибка GigaChat: {e}")
             return Answer("Не получилось получить ответ от языковой модели. Попробуй ещё раз чуть позже.",
