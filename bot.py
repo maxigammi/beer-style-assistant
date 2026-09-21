@@ -15,7 +15,7 @@ from typing import Dict, List
 from aiogram import BaseMiddleware, Bot, Dispatcher, F
 from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command, CommandObject
-from aiogram.types import Message
+from aiogram.types import BotCommand, BotCommandScopeChat, BotCommandScopeDefault, Message
 
 import config
 from access import AccessStore
@@ -124,6 +124,8 @@ async def ask(message: Message, query: str) -> None:
 @dp.message(Command("start"))
 async def cmd_start(message: Message, command: CommandObject):
     user = message.from_user
+    if is_admin(user.id):
+        await set_admin_menu(user.id)  # чат с ботом уже существует — меню точно встанет
     if not has_access(user.id):
         code = (command.args or "").strip()
         if not code:
@@ -160,11 +162,46 @@ async def cmd_start(message: Message, command: CommandObject):
     )
 
 
+# Меню команд Telegram. Админу показывается полный список (по его чату), остальным — пустое:
+# админские команды они не видят вообще. Набранные вручную всё равно отклоняются в admin_only.
+ADMIN_MENU = [
+    BotCommand(command="invite", description="Создать инвайт-ссылку"),
+    BotCommand(command="users", description="Список пользователей"),
+    BotCommand(command="invites", description="Действующие инвайты"),
+    BotCommand(command="whois", description="Кто это: /whois ID"),
+    BotCommand(command="note", description="Заметка о человеке: /note ID текст"),
+    BotCommand(command="kick", description="Заблокировать: /kick ID"),
+    BotCommand(command="unblock", description="Вернуть доступ: /unblock ID"),
+    BotCommand(command="revoke", description="Отозвать инвайт: /revoke КОД или all"),
+    BotCommand(command="ingest", description="Переиндексировать базу знаний"),
+    BotCommand(command="stats", description="Состояние бота"),
+    BotCommand(command="clear", description="Забыть историю диалога"),
+    BotCommand(command="help", description="Справка"),
+]
+
+
+async def set_admin_menu(admin_id: int) -> bool:
+    try:
+        await bot.set_my_commands(ADMIN_MENU, scope=BotCommandScopeChat(chat_id=admin_id))
+        return True
+    except TelegramAPIError as e:
+        # Telegram знает чат только после первого сообщения админа боту; меню поставится в его /start
+        logger.info(f"Меню для админа {admin_id} пока не установлено ({e})")
+        return False
+
+
+async def setup_commands() -> None:
+    # Пустой список для всех: перебивает и старое меню из BotFather
+    await bot.set_my_commands([], scope=BotCommandScopeDefault())
+    for admin_id in config.ADMIN_IDS:
+        await set_admin_menu(admin_id)
+
+
 ADMIN_HELP = (
     "\n\nАдминистратор:\n"
     "/invite [дней=7] [заметка] — создать инвайт (один инвайт — один человек)\n"
     "/invites — действующие инвайты, /revoke КОД|all — отозвать\n"
-    "/users — список, /whois ID — кто это, /kick ID — заблокировать, /unblock ID — вернуть\n"
+    "/users — список, /whois ID — кто это, /note ID текст — заметка, /kick ID — заблокировать, /unblock ID — вернуть\n"
     "/ingest — переиндексация базы"
 )
 
@@ -219,8 +256,12 @@ async def cmd_invite(message: Message, command: CommandObject):
     await message.answer(
         f"Инвайт создан: на одного человека, действует {days} дн."
         + (f"\nЗаметка: {note}" if note else "")
-        + f"\n\nСсылка: https://t.me/{bot_username}?start={code}\n"
-        f"Код: {code}"
+        + f"\nКод для отзыва: {code}\n\nПерешли человеку сообщение ниже ⬇️"
+    )
+    # Отдельное сообщение без служебного текста — пересылается как есть
+    await message.answer(
+        "Приглашаю в Beer Style Assistant — справочник по пивным стилям BJCP.\n"
+        f"Открой ссылку и нажми «Start»: https://t.me/{bot_username}?start={code}"
     )
 
 
@@ -283,6 +324,18 @@ async def cmd_whois(message: Message, command: CommandObject):
         f"ID: {user_id}\nUsername: {'@' + chat.username if chat.username else '—'}\nИмя: {name}"
         + (f"\nЗаметка: {note}" if note else "")
     )
+
+
+@dp.message(Command("note"))
+@admin_only
+async def cmd_note(message: Message, command: CommandObject):
+    """/note ID текст — подпись к пользователю (пустой текст стирает заметку)."""
+    parts = (command.args or "").split(maxsplit=1)
+    if not parts or not parts[0].isdigit():
+        await message.answer("Формат: /note ID текст. Например: /note 123456789 Вася с работы")
+        return
+    ok = access.set_note(int(parts[0]), (parts[1] if len(parts) > 1 else "")[:MAX_NOTE_LEN])
+    await message.answer("Заметка сохранена." if ok else "Такого пользователя нет в списке.")
 
 
 @dp.message(Command("kick"))
@@ -370,6 +423,7 @@ async def main():
     access = AccessStore(config.ACCESS_DB_PATH)
     bot = Bot(token=config.TELEGRAM_TOKEN)
     bot_username = (await bot.me()).username
+    await setup_commands()
     logger.info("Бот запущен")
     await dp.start_polling(bot)
 

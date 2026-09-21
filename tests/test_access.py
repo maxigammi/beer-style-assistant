@@ -101,6 +101,14 @@ def test_note_travels_from_invite_to_user():
     assert s.note_of(999) == ""
 
 
+def test_set_note():
+    s = make_store()
+    s.redeem(s.create_invite(1), 10)
+    assert s.set_note(10, "Маша") and s.note_of(10) == "Маша"
+    assert s.set_note(10, "") and s.note_of(10) == ""
+    assert not s.set_note(999, "x")
+
+
 def test_only_telegram_id_is_stored():
     """О человеке хранится ID, время входа и заметка админа — никаких ников и имён."""
     s = make_store()

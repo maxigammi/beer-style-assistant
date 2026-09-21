@@ -200,6 +200,10 @@ class AccessStore:
         row = self.db.execute("SELECT note FROM users WHERE user_id = ?", (user_id,)).fetchone()
         return row[0] if row else ""
 
+    def set_note(self, user_id: int, note: str) -> bool:
+        cur = self.db.execute("UPDATE users SET note = ? WHERE user_id = ?", (note, user_id))
+        return cur.rowcount == 1
+
     def block_user(self, user_id: int) -> bool:
         """
         Блокирует, а не удаляет: заблокированный не сможет вернуться по новому инвайту,

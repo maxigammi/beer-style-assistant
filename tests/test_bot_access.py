@@ -19,7 +19,7 @@ os.environ.setdefault("TELEGRAM_TOKEN", "123456:TEST")
 from aiogram import Bot  # noqa: E402
 from aiogram.client.session.base import BaseSession  # noqa: E402
 from aiogram.exceptions import TelegramBadRequest  # noqa: E402
-from aiogram.methods import GetChat, GetMe, SendMessage  # noqa: E402
+from aiogram.methods import GetChat, GetMe, SendMessage, SetMyCommands  # noqa: E402
 from aiogram.types import Chat, ChatFullInfo, Message, Update, User  # noqa: E402
 
 import bot as botmod  # noqa: E402
@@ -33,12 +33,20 @@ class RecordingSession(BaseSession):
     def __init__(self):
         super().__init__()
         self.sent = []  # (chat_id, text)
+        self.menus = []  # (scope, [команды])
+        self.no_chat = {404}  # админы, ещё не писавшие боту: для них Telegram отвечает "chat not found"
 
     async def make_request(self, bot, method, timeout=None):
         if isinstance(method, SendMessage):
             self.sent.append((method.chat_id, method.text))
             return Message(message_id=len(self.sent), date=datetime.now(),
                            chat=Chat(id=method.chat_id, type="private"), text=method.text).as_(bot)
+        if isinstance(method, SetMyCommands):
+            scope = method.scope
+            if getattr(scope, "chat_id", None) in self.no_chat:
+                raise TelegramBadRequest(method=method, message="Bad Request: chat not found")
+            self.menus.append((scope, [c.command for c in method.commands]))
+            return True
         if isinstance(method, GetChat):
             if method.chat_id != STRANGER:  # Telegram знает только тех, кто писал боту
                 raise TelegramBadRequest(method=method, message="Bad Request: chat not found")
@@ -71,8 +79,13 @@ async def say(user_id: int, text: str, username: str = None):
     await botmod.dp.feed_update(botmod.bot, Update(update_id=1, message=msg))
 
 
-def last_to(session, user_id):
-    return next(t for c, t in reversed(session.sent) if c == user_id)
+def last_to(session, user_id, n=1):
+    """n-е с конца сообщение, отправленное пользователю."""
+    return [t for c, t in session.sent if c == user_id][-n]
+
+
+def invite_code(session):
+    return re.search(r"start=(\S+)", last_to(session, ADMIN)).group(1)
 
 
 async def scenario():
@@ -96,10 +109,12 @@ async def scenario():
 
     # 3. Админ создаёт инвайт
     await say(ADMIN, "/invite 7 Вася с работы")
-    reply = last_to(session, ADMIN)
-    assert "Вася с работы" in reply
-    code = re.search(r"Код: (\S+)", reply).group(1)
-    assert f"https://t.me/beer_test_bot?start={code}" in reply
+    info, forward = last_to(session, ADMIN, 2), last_to(session, ADMIN)
+    assert "Вася с работы" in info and "7 дн." in info and "Код для отзыва" in info
+    code = invite_code(session)
+    assert f"https://t.me/beer_test_bot?start={code}" in forward
+    # пересылаемое сообщение чистое: без служебных полей админа
+    assert "Код" not in forward and "Вася" not in forward and "Инвайт создан" not in forward
 
     # 4. Неверный код не открывает доступ
     await say(STRANGER, "/start wrongcode")
@@ -151,7 +166,7 @@ async def scenario():
 
     # 11. Заблокированный не входит даже по свежему инвайту (и инвайт не сгорает); /unblock возвращает
     await say(ADMIN, "/invite 7 Для Пети")
-    fresh = re.search(r"Код: (\S+)", last_to(session, ADMIN)).group(1)
+    fresh = invite_code(session)
     await say(STRANGER, f"/start {fresh}")  # STRANGER заблокирован ещё в п. 8
     assert "недействителен" in last_to(session, STRANGER)
     assert "blocked" in last_to(session, ADMIN)
@@ -173,13 +188,15 @@ async def scenario():
 
     # 13. Форматы /invite: только заметка, только срок, мусор
     await say(ADMIN, "/invite Маша")
-    assert "действует 7 дн." in last_to(session, ADMIN) and "Маша" in last_to(session, ADMIN)
+    assert "действует 7 дн." in last_to(session, ADMIN, 2) and "Маша" in last_to(session, ADMIN, 2)
+    await say(ADMIN, "/invite")  # из меню, без аргументов: 7 дней и готовая ссылка
+    assert "действует 7 дн." in last_to(session, ADMIN, 2) and "start=" in last_to(session, ADMIN)
     await say(ADMIN, "/invite 30")
-    assert "действует 30 дн." in last_to(session, ADMIN)
+    assert "действует 30 дн." in last_to(session, ADMIN, 2)
     await say(ADMIN, "/invite 0")
     assert "Формат" in last_to(session, ADMIN)
     await say(ADMIN, "/revoke all")
-    assert "Отозвано инвайтов: 2" in last_to(session, ADMIN)
+    assert "Отозвано инвайтов: 3" in last_to(session, ADMIN)
 
     # 14. /whois: имя и ник берутся у Telegram на лету; для неизвестного ID — понятная ошибка
     await say(ADMIN, f"/whois {STRANGER}")
@@ -192,11 +209,54 @@ async def scenario():
     cols = {r[1] for r in botmod.access.db.execute("PRAGMA table_info(users)")}
     assert "username" not in cols  # /whois ничего не сохраняет
 
+    # 15. /note ставит и стирает заметку
+    await say(ADMIN, f"/note {STRANGER} Петя из гаража")
+    assert "сохранена" in last_to(session, ADMIN)
+    assert botmod.access.note_of(STRANGER) == "Петя из гаража"
+    await say(ADMIN, f"/note {STRANGER}")
+    assert botmod.access.note_of(STRANGER) == ""
+    await say(ADMIN, "/note 555 текст")
+    assert "нет в списке" in last_to(session, ADMIN)
+    await say(STRANGER, f"/note {STRANGER} я себя назначу")
+    assert "только администратору" in last_to(session, STRANGER)
+    assert botmod.access.note_of(STRANGER) == ""
+
+
+async def menu_scenario():
+    session = RecordingSession()
+    botmod.bot = Bot(token="123456:TEST", session=session)
+    config.ADMIN_IDS = {ADMIN, 404}  # 404 ещё не писал боту: его меню не должно ронять запуск
+    await botmod.setup_commands()
+
+    default = [cmds for scope, cmds in session.menus if scope.type == "default"]
+    per_chat = {scope.chat_id: cmds for scope, cmds in session.menus if scope.type == "chat"}
+    assert default == [[]]                       # все остальные не видят ни одной команды
+    assert set(per_chat) == {ADMIN}              # админское меню привязано только к чату админа
+    assert per_chat[ADMIN][0] == "invite"        # /invite — первая в меню
+    assert {"users", "whois", "note", "kick", "unblock", "revoke", "ingest"} <= set(per_chat[ADMIN])
+
+    # Админ 404 пишет боту /start — чат появился, меню ставится сразу, без перезапуска
+    botmod.access = AccessStore(Path(tempfile.mkdtemp()) / "access.db")
+    session.no_chat.discard(404)
+    await say(404, "/start")
+    assert any(scope.type == "chat" and scope.chat_id == 404 for scope, _ in session.menus)
+    # А обычному пользователю меню не ставится никогда
+    await say(ADMIN, "/invite")
+    code = invite_code(session)
+    await say(STRANGER, f"/start {code}")
+    assert not any(scope.type == "chat" and scope.chat_id == STRANGER for scope, _ in session.menus)
+
 
 def test_access_flow():
     asyncio.run(scenario())
 
 
+def test_command_menu():
+    asyncio.run(menu_scenario())
+
+
 if __name__ == "__main__":
     test_access_flow()
-    print("ok  test_access_flow: 14 сценариев пройдено")
+    print("ok  test_access_flow: 16 сценариев пройдено")
+    test_command_menu()
+    print("ok  test_command_menu: меню только у админа")
