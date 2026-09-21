@@ -40,6 +40,7 @@ OPEN_COMMANDS = re.compile(r"^/(start|myid)(@\w+)?(\s|$)")
 MAX_BAD_CODES = 5        # неверных кодов ...
 BAD_CODES_WINDOW = 3600  # ... за этот период (сек) — и пользователя перестаём слушать
 bad_codes: Dict[int, List[float]] = {}
+MAX_NOTE_LEN = 60
 
 
 def is_admin(user_id: int) -> bool:
@@ -57,12 +58,9 @@ class AccessMiddleware(BaseMiddleware):
         user = event.from_user
         if user is None:
             return None
-        if has_access(user.id):
-            access.touch(user.id, user.username)
+        if has_access(user.id) or OPEN_COMMANDS.match(event.text or ""):
             return await handler(event, data)
-        if OPEN_COMMANDS.match(event.text or ""):
-            return await handler(event, data)
-        logger.info(f"Отказ в доступе: id={user.id} username={user.username}")
+        logger.info(f"Отказ в доступе: id={user.id}")
         await event.answer(DENIED_TEXT)
         return None
 
@@ -104,11 +102,12 @@ async def send_long(message: Message, text: str, limit: int = 4000) -> None:
 async def ask(message: Message, query: str) -> None:
     user_id = message.from_user.id
     logger.info(f"Вопрос от {user_id}: {query}")
-    access.count_question(user_id)
     status = await message.answer("Ищу в справочнике…")
     try:
         user_history = history.setdefault(user_id, [])
         answer = await asyncio.to_thread(pipeline.answer, query, user_history)
+        # Сюда же встанет учёт и проверка лимита токенов по user_id (см. README, «Планы»)
+        logger.info(f"Ответ для {user_id}: токенов GigaChat {answer.tokens}")
         if answer.used_rag:  # в историю пишем только содержательные обмены
             user_history += [{"role": "user", "content": query},
                              {"role": "assistant", "content": answer.text}]
@@ -132,22 +131,23 @@ async def cmd_start(message: Message, command: CommandObject):
         if too_many_bad_codes(user.id):
             logger.warning(f"Слишком много неверных кодов от {user.id}")
             return  # молчим: перебор кодов ничего не даёт
-        result = access.redeem(code, user.id, user.username)
+        result = access.redeem(code, user.id)
         if result != "ok":
             first_failure = not bad_codes.get(user.id)  # список уже очищен от старых попыток выше
             bad_codes.setdefault(user.id, []).append(time.time())
-            who = f"id={user.id}, username=@{user.username or '—'}"
+            who = f"id={user.id}, username=@{user.username or '—'}"  # ник — только в уведомление, не в лог
             # Пользователю причина не раскрывается (нельзя отличить «нет такого» от «уже использован»),
             # а в лог и админу она нужна: по ней видно перебор и пересылку ссылок
-            logger.warning(f"Инвайт отклонён ({result}): {who}, код={code[:4]}…")
+            logger.warning(f"Инвайт отклонён ({result}): id={user.id}, код={code[:4]}…")
             # Опечатки — не чаще раза в час на человека, чтобы перебор не заспамил админа;
             # попытка вернуться после блокировки важнее — о ней сообщаем всегда (потолок: MAX_BAD_CODES/час)
             if first_failure or result == "blocked":
                 await notify_admins(f"Неудачная попытка входа: {who}, причина: {result}")
             await message.answer("Код недействителен: он неверный, просрочен или уже использован.")
             return
-        logger.info(f"Новый пользователь {user.id} ({user.username}) по инвайту")
-        await notify_admins(f"Новый пользователь: id={user.id}, username=@{user.username or '—'}")
+        note = access.note_of(user.id)
+        logger.info(f"Новый пользователь {user.id} по инвайту")
+        await notify_admins(f"Новый пользователь: id={user.id}" + (f", заметка: {note}" if note else ""))
         await message.answer("Доступ открыт!")
     await message.answer(
         "Привет! Я Beer Style Assistant — справочник по пивным стилям BJCP 2021.\n\n"
@@ -161,7 +161,7 @@ async def cmd_start(message: Message, command: CommandObject):
 
 ADMIN_HELP = (
     "\n\nАдминистратор:\n"
-    "/invite [чел=1] [дней=7] — создать инвайт\n"
+    "/invite [чел=1] [дней=7] [заметка] — создать инвайт\n"
     "/invites — действующие инвайты, /revoke КОД|all — отозвать\n"
     "/users — список пользователей, /kick ID — заблокировать, /unblock ID — вернуть\n"
     "/ingest — переиндексация базы"
@@ -206,21 +206,22 @@ def admin_only(handler):
 @dp.message(Command("invite"))
 @admin_only
 async def cmd_invite(message: Message, command: CommandObject):
-    """/invite [использований=1] [дней=7]"""
-    args = (command.args or "").split()
-    try:
-        uses = int(args[0]) if len(args) > 0 else 1
-        days = int(args[1]) if len(args) > 1 else 7
-    except ValueError:
-        uses = days = 0
+    """/invite [чел=1] [дней=7] [заметка]"""
+    words = (command.args or "").split()
+    numbers = []
+    while words and len(numbers) < 2 and words[0].isdigit():
+        numbers.append(int(words.pop(0)))
+    uses, days = (numbers + [1, 7][len(numbers):])[:2]
+    note = " ".join(words)[:MAX_NOTE_LEN]
     if not (1 <= uses <= 100 and 1 <= days <= 90):
-        await message.answer("Формат: /invite [сколько человек: 1–100] [срок в днях: 1–90]\n"
-                             "Например: /invite 1 7")
+        await message.answer("Формат: /invite [сколько человек: 1–100] [срок в днях: 1–90] [заметка]\n"
+                             "Например: /invite 1 7 Вася с работы")
         return
-    code = access.create_invite(message.from_user.id, uses, days)
+    code = access.create_invite(message.from_user.id, uses, days, note)
     await message.answer(
-        f"Инвайт создан: на {uses} чел., действует {days} дн.\n\n"
-        f"Ссылка: https://t.me/{bot_username}?start={code}\n"
+        f"Инвайт создан: на {uses} чел., действует {days} дн."
+        + (f"\nЗаметка: {note}" if note else "")
+        + f"\n\nСсылка: https://t.me/{bot_username}?start={code}\n"
         f"Код: {code}"
     )
 
@@ -232,7 +233,8 @@ async def cmd_invites(message: Message):
     if not items:
         await message.answer("Действующих инвайтов нет. Создать: /invite")
         return
-    lines = [f"{i.code} — использовано {i.uses}/{i.max_uses}, до {fmt_date(i.expires_at)}" for i in items]
+    lines = [f"{i.code} — использовано {i.uses}/{i.max_uses}, до {fmt_date(i.expires_at)}"
+             + (f" — {i.note}" if i.note else "") for i in items]
     await message.answer("Действующие инвайты:\n" + "\n".join(lines) + "\n\nОтозвать: /revoke КОД")
 
 
@@ -257,11 +259,8 @@ async def cmd_users(message: Message):
     if not users:
         await message.answer("Приглашённых пользователей пока нет.")
         return
-    lines = [
-        f"{'⛔ ' if u.blocked else ''}{u.user_id} @{u.username or '—'} — вопросов: {u.questions}, "
-        f"был: {fmt_date(u.last_seen) if u.last_seen else '—'}"
-        for u in users
-    ]
+    lines = [f"{'⛔ ' if u.blocked else ''}{u.user_id}" + (f" — {u.note}" if u.note else "")
+             + f" (с {fmt_date(u.joined_at)})" for u in users]
     await message.answer(f"Пользователи ({len(users)}):\n" + "\n".join(lines)
                          + "\n\nЗаблокировать: /kick ID, вернуть: /unblock ID")
 

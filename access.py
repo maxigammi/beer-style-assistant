@@ -18,18 +18,16 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import List
 
 logger = logging.getLogger(__name__)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
-    user_id   INTEGER PRIMARY KEY,
-    username  TEXT,
+    user_id   INTEGER PRIMARY KEY,   -- единственные данные о человеке: его Telegram ID
     joined_at INTEGER NOT NULL,
     invite    TEXT,
-    last_seen INTEGER,
-    questions INTEGER NOT NULL DEFAULT 0,
+    note      TEXT NOT NULL DEFAULT '',  -- заметка админа из инвайта («Вася с работы»)
     blocked   INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS invites (
@@ -39,16 +37,19 @@ CREATE TABLE IF NOT EXISTS invites (
     expires_at INTEGER NOT NULL,
     max_uses   INTEGER NOT NULL,
     uses       INTEGER NOT NULL DEFAULT 0,
-    revoked    INTEGER NOT NULL DEFAULT 0
+    revoked    INTEGER NOT NULL DEFAULT 0,
+    note       TEXT NOT NULL DEFAULT ''
 );
 """
 
 # Колонки, добавленные после первой версии схемы: для баз, созданных раньше
 MIGRATIONS = {
     "users": {
-        "last_seen": "INTEGER",
-        "questions": "INTEGER NOT NULL DEFAULT 0",
+        "note": "TEXT NOT NULL DEFAULT ''",
         "blocked": "INTEGER NOT NULL DEFAULT 0",
+    },
+    "invites": {
+        "note": "TEXT NOT NULL DEFAULT ''",
     },
 }
 
@@ -66,15 +67,14 @@ class Invite:
     expires_at: int
     max_uses: int
     uses: int
+    note: str
 
 
 @dataclass
 class User:
     user_id: int
-    username: Optional[str]
     joined_at: int
-    last_seen: Optional[int]
-    questions: int
+    note: str
     blocked: bool
 
 
@@ -113,26 +113,18 @@ class AccessStore:
         ).fetchone()
         return row is not None
 
-    def touch(self, user_id: int, username: Optional[str]) -> None:
-        """Отмечает активность (и актуализирует username, он мог смениться)."""
-        self.db.execute("UPDATE users SET last_seen = ?, username = ? WHERE user_id = ?",
-                        (int(time.time()), username, user_id))
-
-    def count_question(self, user_id: int) -> None:
-        self.db.execute("UPDATE users SET questions = questions + 1 WHERE user_id = ?", (user_id,))
-
     # ---------- инвайты ----------
 
-    def create_invite(self, created_by: int, max_uses: int = 1, days: int = 7) -> str:
+    def create_invite(self, created_by: int, max_uses: int = 1, days: int = 7, note: str = "") -> str:
         code = secrets.token_urlsafe(8)  # ~64 бита; символы безопасны для deep link
         now = int(time.time())
         self.db.execute(
-            "INSERT INTO invites (code, created_by, created_at, expires_at, max_uses) VALUES (?,?,?,?,?)",
-            (code, created_by, now, now + days * DAY, max_uses),
+            "INSERT INTO invites (code, created_by, created_at, expires_at, max_uses, note) VALUES (?,?,?,?,?,?)",
+            (code, created_by, now, now + days * DAY, max_uses, note),
         )
         return code
 
-    def redeem(self, code: str, user_id: int, username: Optional[str]) -> str:
+    def redeem(self, code: str, user_id: int) -> str:
         """
         Гасит инвайт. Возвращает OK, ALREADY (уже участник — инвайт не тратится,
         чтобы админ мог проверить собственную ссылку) либо причину отказа из FAILURES.
@@ -154,8 +146,9 @@ class AccessStore:
                     return self._why_failed(code, now)
 
                 self.db.execute(
-                    "INSERT INTO users (user_id, username, joined_at, invite, last_seen) VALUES (?,?,?,?,?)",
-                    (user_id, username, now, code, now),
+                    "INSERT INTO users (user_id, joined_at, invite, note) "
+                    "SELECT ?, ?, code, note FROM invites WHERE code = ?",
+                    (user_id, now, code),
                 )
                 return OK
         except sqlite3.OperationalError as e:  # база занята дольше timeout
@@ -177,7 +170,7 @@ class AccessStore:
 
     def active_invites(self) -> List[Invite]:
         rows = self.db.execute(
-            "SELECT code, expires_at, max_uses, uses FROM invites "
+            "SELECT code, expires_at, max_uses, uses, note FROM invites "
             "WHERE revoked = 0 AND uses < max_uses AND expires_at > ? ORDER BY created_at",
             (int(time.time()),),
         ).fetchall()
@@ -199,9 +192,13 @@ class AccessStore:
 
     def users(self) -> List[User]:
         rows = self.db.execute(
-            "SELECT user_id, username, joined_at, last_seen, questions, blocked FROM users ORDER BY joined_at"
+            "SELECT user_id, joined_at, note, blocked FROM users ORDER BY joined_at"
         ).fetchall()
-        return [User(r[0], r[1], r[2], r[3], r[4], bool(r[5])) for r in rows]
+        return [User(r[0], r[1], r[2], bool(r[3])) for r in rows]
+
+    def note_of(self, user_id: int) -> str:
+        row = self.db.execute("SELECT note FROM users WHERE user_id = ?", (user_id,)).fetchone()
+        return row[0] if row else ""
 
     def block_user(self, user_id: int) -> bool:
         """

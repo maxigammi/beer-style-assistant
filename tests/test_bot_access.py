@@ -56,7 +56,7 @@ class FakePipeline:
     def answer(self, query, history=None):
         from rag.pipeline import Answer
         self.calls += 1
-        return Answer("ответ про пиво", ["BJCP 21A"], 0.9, True)
+        return Answer("ответ про пиво", ["BJCP 21A"], 0.9, True, tokens=1234)
 
 
 async def say(user_id: int, text: str, username: str = None):
@@ -89,8 +89,9 @@ async def scenario():
     assert botmod.pipeline.calls == 0
 
     # 3. Админ создаёт инвайт
-    await say(ADMIN, "/invite 1 7")
+    await say(ADMIN, "/invite 1 7 Вася с работы")
     reply = last_to(session, ADMIN)
+    assert "Вася с работы" in reply
     code = re.search(r"Код: (\S+)", reply).group(1)
     assert f"https://t.me/beer_test_bot?start={code}" in reply
 
@@ -103,7 +104,7 @@ async def scenario():
     # 5. Верный код открывает доступ, админ получает уведомление
     await say(STRANGER, f"/start {code}", username="vasya")
     assert "Доступ открыт" in [t for c, t in session.sent if c == STRANGER][-2]
-    assert "Новый пользователь" in last_to(session, ADMIN) and "vasya" in last_to(session, ADMIN)
+    assert "Новый пользователь" in last_to(session, ADMIN) and "Вася с работы" in last_to(session, ADMIN)
     await say(STRANGER, "какая горечь у IPA?")
     assert botmod.pipeline.calls == 1
     assert "ответ про пиво" in last_to(session, STRANGER)
@@ -157,9 +158,20 @@ async def scenario():
 
     # 12. /users показывает активность, /revoke all отзывает всё
     await say(ADMIN, "/users")
-    assert "вопросов: 2" in last_to(session, ADMIN)  # два вопроса STRANGER (п. 5 и п. 11)
+    users_view = last_to(session, ADMIN)
+    assert f"{STRANGER} — Вася с работы" in users_view  # заметка вместо ника
+    assert "vasya" not in users_view
     await say(ADMIN, "/revoke all")
     assert "Отозвано инвайтов: 1" in last_to(session, ADMIN)
+
+    # 13. Форматы /invite: только заметка, только числа, мусор
+    await say(ADMIN, "/invite Маша")
+    assert "на 1 чел., действует 7 дн." in last_to(session, ADMIN) and "Маша" in last_to(session, ADMIN)
+    await say(ADMIN, "/invite 3")
+    assert "на 3 чел., действует 7 дн." in last_to(session, ADMIN)
+    await say(ADMIN, "/invite 0 7")
+    assert "Формат" in last_to(session, ADMIN)
+    assert botmod.access.db.execute("SELECT COUNT(*) FROM users WHERE user_id = 1").fetchone()[0] == 0
 
 
 def test_access_flow():
@@ -168,4 +180,4 @@ def test_access_flow():
 
 if __name__ == "__main__":
     test_access_flow()
-    print("ok  test_access_flow: 12 сценариев пройдено")
+    print("ok  test_access_flow: 13 сценариев пройдено")

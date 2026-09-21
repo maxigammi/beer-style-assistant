@@ -6,7 +6,7 @@ RAG-пайплайн: поиск стилей (OpenAI-эмбеддинги + FAI
 
 import logging
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from config import (
     EMBED_MODEL, MAX_CONTEXT_CHARS, MIN_SCORE, NO_CONTEXT_REPLY, RAG_PROMPT_TEMPLATE, REWRITE_PROMPT,
@@ -26,6 +26,7 @@ class Answer:
     sources: List[str] = field(default_factory=list)
     top_score: float = 0.0
     used_rag: bool = False
+    tokens: int = 0  # токены GigaChat на весь запрос (переписывание + ответ); основа для будущих лимитов
 
 
 class RAGPipeline:
@@ -53,19 +54,20 @@ class RAGPipeline:
         self.is_loaded = True
         return len(chunks)
 
-    def rewrite_query(self, query: str, history: Optional[List[Dict[str, str]]] = None) -> str:
-        """Английский поисковый запрос от LLM; при сбое — исходный вопрос."""
+    def rewrite_query(self, query: str, history: Optional[List[Dict[str, str]]] = None) -> Tuple[str, int]:
+        """(поисковый запрос на английском, потрачено токенов); при сбое LLM — исходный вопрос."""
         messages = [{"role": "system", "content": REWRITE_PROMPT}]
         messages.extend((history or [])[-4:])
         messages.append({"role": "user", "content": query})
         try:
-            rewritten = self.llm.chat(messages, temperature=0.0, max_tokens=60).strip().strip('"')
+            result = self.llm.chat_ex(messages, temperature=0.0, max_tokens=60)
         except GigaChatError as e:
             logger.warning(f"Переписывание запроса не удалось, ищем по исходному: {e}")
-            return query
+            return query, 0
+        rewritten = result.text.strip().strip('"')
         logger.info(f"Запрос: {query!r} -> {rewritten!r}")
         # Исходный текст оставляем: в нём могут быть названия марок и стилей как есть
-        return f"{query}\n{rewritten}" if rewritten else query
+        return (f"{query}\n{rewritten}" if rewritten else query), result.tokens
 
     def retrieve(self, query: str, top_k: int = TOP_K_RESULTS) -> List[SearchHit]:
         """Поиск стилей; отбрасывает результаты ниже порога MIN_SCORE."""
@@ -78,11 +80,11 @@ class RAGPipeline:
         if not self.is_loaded:
             return Answer("База знаний не загружена. Администратор должен выполнить /ingest.")
 
-        search_query = self.rewrite_query(query, history)
+        search_query, tokens = self.rewrite_query(query, history)
 
         hits = self.retrieve(search_query)
         if not hits:
-            return Answer(NO_CONTEXT_REPLY, top_score=0.0)
+            return Answer(NO_CONTEXT_REPLY, top_score=0.0, tokens=tokens)
 
         context = self._build_context(hits)
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
@@ -90,13 +92,14 @@ class RAGPipeline:
         messages.append({"role": "user", "content": RAG_PROMPT_TEMPLATE.format(context=context, query=query)})
 
         try:
-            text = self.llm.chat(messages)
+            result = self.llm.chat_ex(messages)
         except GigaChatError as e:
             logger.error(f"Ошибка GigaChat: {e}")
-            return Answer("Не получилось получить ответ от языковой модели. Попробуй ещё раз чуть позже.")
+            return Answer("Не получилось получить ответ от языковой модели. Попробуй ещё раз чуть позже.",
+                          tokens=tokens)
 
-        return Answer(text=text, sources=[h.chunk.source for h in hits],
-                      top_score=hits[0].score, used_rag=True)
+        return Answer(text=result.text, sources=[h.chunk.source for h in hits],
+                      top_score=hits[0].score, used_rag=True, tokens=tokens + result.tokens)
 
     @staticmethod
     def _build_context(hits: List[SearchHit]) -> str:

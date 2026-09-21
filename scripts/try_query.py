@@ -29,11 +29,11 @@ if __name__ == "__main__":
         raise SystemExit("Индекс не загружен: сначала python scripts/ingest.py")
     if retrieval_only:
         # top_k расширен, чтобы увидеть score и ниже порога
-        hits = pipe.vectorstore.search(pipe.embedder.embed_query(pipe.rewrite_query(query)), 8)
+        hits = pipe.vectorstore.search(pipe.embedder.embed_query(pipe.rewrite_query(query)[0]), 8)
         for h in hits:
             mark = "✓" if h.score >= config.MIN_SCORE else "✗"
             print(f"{mark} {h.score:.3f}  {h.chunk.source}")
     else:
         ans = pipe.answer(query)
         print(ans.text)
-        print(f"\n[rag={ans.used_rag} top_score={ans.top_score:.3f} sources={ans.sources}]")
+        print(f"\n[rag={ans.used_rag} top_score={ans.top_score:.3f} tokens={ans.tokens} sources={ans.sources}]")

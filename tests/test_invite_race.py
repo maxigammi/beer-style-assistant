@@ -19,7 +19,7 @@ WORKERS = 20
 
 def redeem_worker(args):
     db_path, code, user_id = args
-    return AccessStore(Path(db_path)).redeem(code, user_id, f"u{user_id}")
+    return AccessStore(Path(db_path)).redeem(code, user_id)
 
 
 def run(max_uses: int, users: list[int]) -> Counter:

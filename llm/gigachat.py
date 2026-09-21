@@ -9,6 +9,7 @@ import logging
 import threading
 import time
 import uuid
+from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 import requests
@@ -26,6 +27,12 @@ MAX_RETRIES = 3
 
 class GigaChatError(RuntimeError):
     pass
+
+
+@dataclass
+class ChatResult:
+    text: str
+    tokens: int  # usage.total_tokens — нужен для учёта расхода по пользователям
 
 
 class GigaChatClient:
@@ -63,6 +70,10 @@ class GigaChatClient:
 
     def chat(self, messages: List[Dict[str, str]], temperature: float = 0.3,
              max_tokens: int = 1000) -> str:
+        return self.chat_ex(messages, temperature, max_tokens).text
+
+    def chat_ex(self, messages: List[Dict[str, str]], temperature: float = 0.3,
+                max_tokens: int = 1000) -> ChatResult:
         payload = {
             "model": self.model,
             "messages": messages,
@@ -81,7 +92,11 @@ class GigaChatClient:
                     verify=self._verify,
                 )
                 if resp.status_code == 200:
-                    return resp.json()["choices"][0]["message"]["content"]
+                    data = resp.json()
+                    return ChatResult(
+                        text=data["choices"][0]["message"]["content"],
+                        tokens=data.get("usage", {}).get("total_tokens", 0),
+                    )
                 last_status = resp.status_code
                 if last_status in (401, 429) or last_status >= 500:
                     logger.warning(f"GigaChat HTTP {last_status}, попытка {attempt}/{MAX_RETRIES}")
