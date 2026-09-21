@@ -46,11 +46,14 @@ GIGACHAT_API_URL = "https://api.giga.chat/v1"
 REQUEST_TIMEOUT = 60
 
 # ========== ХРАНИЛИЩЕ ==========
+# База знаний (data/styles) лежит в git, рядом с кодом. Изменяемое состояние (векторный индекс и
+# список пользователей) можно вынести в отдельный каталог: STATE_DIR (в Docker это смонтированный том).
 STYLES_DIR = BASE_DIR / "data" / "styles"
-INDEX_DIR = BASE_DIR / "data" / "index"
+STATE_DIR = Path(os.getenv("STATE_DIR") or BASE_DIR / "data")
+INDEX_DIR = STATE_DIR / "index"
 FAISS_INDEX_PATH = INDEX_DIR / "index.faiss"
 METADATA_PATH = INDEX_DIR / "metadata.json"
-ACCESS_DB_PATH = BASE_DIR / "data" / "access.db"  # инвайты и список пользователей
+ACCESS_DB_PATH = STATE_DIR / "access.db"  # инвайты и список пользователей
 
 # ========== RAG ==========
 TOP_K_RESULTS = 4
