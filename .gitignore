@@ -72,3 +72,4 @@ dmypy.json
 
 # Индекс и локальные данные
 data/index/
+data/access.db*

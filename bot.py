@@ -5,14 +5,19 @@ Beer Style Assistant — Telegram-бот со справочником пивн�
 """
 
 import asyncio
+import functools
 import logging
+import re
+import time
+from datetime import datetime
 from typing import Dict, List
 
-from aiogram import Bot, Dispatcher, F
+from aiogram import BaseMiddleware, Bot, Dispatcher, F
 from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 
 import config
+from access import AccessStore
 
 logging.basicConfig(
     level=getattr(logging, config.LOG_LEVEL),
@@ -24,7 +29,53 @@ logger = logging.getLogger(__name__)
 dp = Dispatcher()
 pipeline = None  # создаётся в main() после проверки конфигурации
 bot = None
+bot_username = ""
+access = None  # AccessStore, создаётся в main()
 history: Dict[int, List[Dict[str, str]]] = {}
+
+DENIED_TEXT = ("Этот бот работает по приглашениям. Если у тебя есть код, отправь: /start КОД\n"
+               "Или открой пригласительную ссылку.")
+# Без доступа разрешены только /start и /myid — чтобы можно было погасить инвайт и узнать свой ID
+OPEN_COMMANDS = re.compile(r"^/(start|myid)(@\w+)?(\s|$)")
+MAX_BAD_CODES = 5        # неверных кодов ...
+BAD_CODES_WINDOW = 3600  # ... за этот период (сек) — и пользователя перестаём слушать
+bad_codes: Dict[int, List[float]] = {}
+
+
+def is_admin(user_id: int) -> bool:
+    return user_id in config.ADMIN_IDS
+
+
+def has_access(user_id: int) -> bool:
+    return is_admin(user_id) or access.is_member(user_id)
+
+
+class AccessMiddleware(BaseMiddleware):
+    """Пропускает к хендлерам только админов и участников; остальным — отказ без вызова LLM."""
+
+    async def __call__(self, handler, event: Message, data):
+        user = event.from_user
+        if user is None:
+            return None
+        if has_access(user.id) or OPEN_COMMANDS.match(event.text or ""):
+            return await handler(event, data)
+        logger.info(f"Отказ в доступе: id={user.id} username={user.username}")
+        await event.answer(DENIED_TEXT)
+        return None
+
+
+dp.message.outer_middleware(AccessMiddleware())
+
+
+def too_many_bad_codes(user_id: int) -> bool:
+    now = time.time()
+    attempts = [t for t in bad_codes.get(user_id, []) if now - t < BAD_CODES_WINDOW]
+    bad_codes[user_id] = attempts
+    return len(attempts) >= MAX_BAD_CODES
+
+
+def fmt_date(ts: int) -> str:
+    return datetime.fromtimestamp(ts).strftime("%d.%m.%Y %H:%M")
 
 
 def format_answer(answer) -> str:
@@ -59,7 +110,30 @@ async def ask(message: Message, query: str) -> None:
 
 
 @dp.message(Command("start"))
-async def cmd_start(message: Message):
+async def cmd_start(message: Message, command: CommandObject):
+    user = message.from_user
+    if not has_access(user.id):
+        code = (command.args or "").strip()
+        if not code:
+            await message.answer(DENIED_TEXT)
+            return
+        if too_many_bad_codes(user.id):
+            logger.warning(f"Слишком много неверных кодов от {user.id}")
+            return  # молчим: перебор кодов ничего не даёт
+        result = access.redeem(code, user.id, user.username)
+        if result == "invalid":
+            bad_codes.setdefault(user.id, []).append(time.time())
+            logger.info(f"Неверный инвайт от {user.id}")
+            await message.answer("Код недействителен: он неверный, просрочен или уже использован.")
+            return
+        logger.info(f"Новый пользователь {user.id} ({user.username}) по инвайту")
+        for admin_id in config.ADMIN_IDS:
+            try:
+                await bot.send_message(admin_id, f"Новый пользователь: id={user.id}, "
+                                                 f"username=@{user.username or '—'}")
+            except Exception:
+                logger.warning(f"Не удалось уведомить админа {admin_id}")
+        await message.answer("Доступ открыт!")
     await message.answer(
         "Привет! Я Beer Style Assistant — справочник по пивным стилям BJCP 2021.\n\n"
         "Спроси, например:\n"
@@ -68,6 +142,15 @@ async def cmd_start(message: Message):
         "• Какое пиво пить к стейку?\n\n"
         "Команды: /help, /ask <вопрос>, /stats, /clear"
     )
+
+
+ADMIN_HELP = (
+    "\n\nАдминистратор:\n"
+    "/invite [чел=1] [дней=7] — создать инвайт\n"
+    "/invites — действующие инвайты, /revoke КОД — отозвать\n"
+    "/users — список пользователей, /kick ID — убрать\n"
+    "/ingest — переиндексация базы"
+)
 
 
 @dp.message(Command("help"))
@@ -79,8 +162,8 @@ async def cmd_help(message: Message):
         "/stats — состояние базы знаний\n"
         "/clear — забыть историю диалога\n"
         "/myid — показать твой Telegram ID\n"
-        "/ingest — переиндексация базы (только админ)\n\n"
         "База знаний пока на английском, ответы я перевожу на лету."
+        + ADMIN_HELP * is_admin(message.from_user.id)
     )
 
 
@@ -90,6 +173,87 @@ async def cmd_ask(message: Message, command: CommandObject):
         await message.answer("Напиши вопрос после команды, например: /ask Какая горечь у American IPA?")
         return
     await ask(message, command.args)
+
+
+# ========== УПРАВЛЕНИЕ ДОСТУПОМ (только админы) ==========
+
+def admin_only(handler):
+    """Декоратор: команда доступна только ADMIN_IDS."""
+    @functools.wraps(handler)  # aiogram определяет нужные аргументы по сигнатуре оригинала
+    async def wrapper(message: Message, *args, **kwargs):
+        if not is_admin(message.from_user.id):
+            await message.answer("Эта команда доступна только администратору.")
+            return
+        return await handler(message, *args, **kwargs)
+    return wrapper
+
+
+@dp.message(Command("invite"))
+@admin_only
+async def cmd_invite(message: Message, command: CommandObject):
+    """/invite [использований=1] [дней=7]"""
+    args = (command.args or "").split()
+    try:
+        uses = int(args[0]) if len(args) > 0 else 1
+        days = int(args[1]) if len(args) > 1 else 7
+    except ValueError:
+        uses = days = 0
+    if not (1 <= uses <= 100 and 1 <= days <= 90):
+        await message.answer("Формат: /invite [сколько человек: 1–100] [срок в днях: 1–90]\n"
+                             "Например: /invite 1 7")
+        return
+    code = access.create_invite(message.from_user.id, uses, days)
+    await message.answer(
+        f"Инвайт создан: на {uses} чел., действует {days} дн.\n\n"
+        f"Ссылка: https://t.me/{bot_username}?start={code}\n"
+        f"Код: {code}"
+    )
+
+
+@dp.message(Command("invites"))
+@admin_only
+async def cmd_invites(message: Message):
+    items = access.active_invites()
+    if not items:
+        await message.answer("Действующих инвайтов нет. Создать: /invite")
+        return
+    lines = [f"{i.code} — использовано {i.uses}/{i.max_uses}, до {fmt_date(i.expires_at)}" for i in items]
+    await message.answer("Действующие инвайты:\n" + "\n".join(lines) + "\n\nОтозвать: /revoke КОД")
+
+
+@dp.message(Command("revoke"))
+@admin_only
+async def cmd_revoke(message: Message, command: CommandObject):
+    code = (command.args or "").strip()
+    if not code:
+        await message.answer("Формат: /revoke КОД")
+        return
+    ok = access.revoke(code)
+    await message.answer("Инвайт отозван." if ok else "Такой действующий инвайт не найден.")
+
+
+@dp.message(Command("users"))
+@admin_only
+async def cmd_users(message: Message):
+    users = access.users()
+    if not users:
+        await message.answer("Приглашённых пользователей пока нет.")
+        return
+    lines = [f"{u.user_id} @{u.username or '—'} — с {fmt_date(u.joined_at)}" for u in users]
+    await message.answer(f"Пользователи ({len(users)}):\n" + "\n".join(lines) + "\n\nУбрать: /kick ID")
+
+
+@dp.message(Command("kick"))
+@admin_only
+async def cmd_kick(message: Message, command: CommandObject):
+    arg = (command.args or "").strip()
+    if not arg.lstrip("-").isdigit():
+        await message.answer("Формат: /kick ID (список: /users)")
+        return
+    user_id = int(arg)
+    removed = access.remove_user(user_id)
+    history.pop(user_id, None)
+    await message.answer("Доступ отозван." if removed else "Такого пользователя нет в списке.")
 
 
 @dp.message(Command("ingest"))
@@ -142,16 +306,16 @@ async def handle_other(message: Message):
 
 
 async def main():
-    global pipeline, bot
+    global pipeline, bot, bot_username, access
     config.validate()
     from rag.pipeline import RAGPipeline  # импорт после проверки конфигурации
 
     pipeline = RAGPipeline()
     if not pipeline.is_loaded:
         logger.warning("База знаний не загружена — выполните /ingest или python scripts/ingest.py")
-    if not config.ADMIN_IDS:
-        logger.warning("ADMIN_IDS пуст: /ingest в боте недоступен, используйте scripts/ingest.py")
+    access = AccessStore(config.ACCESS_DB_PATH)
     bot = Bot(token=config.TELEGRAM_TOKEN)
+    bot_username = (await bot.me()).username
     logger.info("Бот запущен")
     await dp.start_polling(bot)
 

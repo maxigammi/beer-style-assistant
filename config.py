@@ -25,7 +25,7 @@ load_dotenv(BASE_DIR / ".env")
 
 # ========== TELEGRAM ==========
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
-# ID администраторов через запятую; только им доступна команда /ingest
+# ID администраторов через запятую: полный доступ, выдача инвайтов, /ingest
 ADMIN_IDS = {int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()}
 
 # ========== OPENAI (эмбеддинги) ==========
@@ -51,6 +51,7 @@ STYLES_DIR = BASE_DIR / "data" / "styles"
 INDEX_DIR = BASE_DIR / "data" / "index"
 FAISS_INDEX_PATH = INDEX_DIR / "index.faiss"
 METADATA_PATH = INDEX_DIR / "metadata.json"
+ACCESS_DB_PATH = BASE_DIR / "data" / "access.db"  # инвайты и список пользователей
 
 # ========== RAG ==========
 TOP_K_RESULTS = 4
@@ -103,6 +104,8 @@ def validate(*, need_telegram: bool = True, need_llm: bool = True) -> None:
     required = {"OPENAI_API_KEY": OPENAI_API_KEY}
     if need_telegram:
         required["TELEGRAM_TOKEN"] = TELEGRAM_TOKEN
+        # без админа никто не сможет создавать инвайты — бот был бы закрыт для всех
+        required["ADMIN_IDS"] = ADMIN_IDS
     if need_llm:
         required["GIGACHAT_AUTH_KEY"] = GIGACHAT_AUTH_KEY
     missing = [name for name, value in required.items() if not value]
