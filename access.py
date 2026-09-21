@@ -18,7 +18,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -195,6 +195,12 @@ class AccessStore:
             "SELECT user_id, joined_at, note, blocked FROM users ORDER BY joined_at"
         ).fetchall()
         return [User(r[0], r[1], r[2], bool(r[3])) for r in rows]
+
+    def get_user(self, user_id: int) -> Optional[User]:
+        row = self.db.execute(
+            "SELECT user_id, joined_at, note, blocked FROM users WHERE user_id = ?", (user_id,)
+        ).fetchone()
+        return User(row[0], row[1], row[2], bool(row[3])) if row else None
 
     def note_of(self, user_id: int) -> str:
         row = self.db.execute("SELECT note FROM users WHERE user_id = ?", (user_id,)).fetchone()
