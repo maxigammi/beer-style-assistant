@@ -28,12 +28,17 @@ if __name__ == "__main__":
     if not pipe.is_loaded:
         raise SystemExit("Индекс не загружен: сначала python scripts/ingest.py")
     if retrieval_only:
-        # top_k расширен, чтобы увидеть score и ниже порога
-        hits = pipe.vectorstore.search(pipe.embedder.embed_query(pipe.rewrite_query(query)[0]), 8)
-        for h in hits:
-            mark = "✓" if h.score >= config.MIN_SCORE else "✗"
-            print(f"{mark} {h.score:.3f}  {h.chunk.source}")
+        plan = pipe.understand(query)
+        if plan.intent == "compare":
+            for g in pipe.build_groups(plan):
+                print(f"группа «{g.label}» ({g.keyword}): {[c.source for c in g.chunks]}")
+        else:
+            # top_k расширен, чтобы увидеть score и ниже порога
+            for h in pipe.vectorstore.search(pipe.embedder.embed_query(plan.query), 8):
+                mark = "✓" if h.score >= config.MIN_SCORE else "✗"
+                print(f"{mark} {h.score:.3f}  {h.chunk.source}")
     else:
         ans = pipe.answer(query)
         print(ans.text)
-        print(f"\n[rag={ans.used_rag} top_score={ans.top_score:.3f} tokens={ans.tokens} sources={ans.sources}]")
+        print(f"\n[mode={ans.mode} rag={ans.used_rag} top_score={ans.top_score:.3f} tokens={ans.tokens} "
+              f"warnings={ans.warnings} sources={ans.sources}]")

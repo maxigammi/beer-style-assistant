@@ -135,7 +135,8 @@ def format_answer(answer, debug: bool = False) -> str:
     text = answer.text
     if debug and answer.sources:
         text += ("\n\n— отладка —\nИсточники: " + "; ".join(answer.sources)
-                 + f"\nscore {answer.top_score:.3f} · токены {answer.tokens}")
+                 + f"\nрежим {answer.mode} · score {answer.top_score:.3f} · токены {answer.tokens}"
+                 + "".join(f"\n⚠ {w}" for w in answer.warnings))
     return text
 
 

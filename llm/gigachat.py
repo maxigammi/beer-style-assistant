@@ -32,7 +32,7 @@ class GigaChatError(RuntimeError):
 @dataclass
 class ChatResult:
     text: str
-    tokens: int  # usage.total_tokens — нужен для учёта расхода по пользователям
+    tokens: int  # расход по usage: total_tokens + precached_prompt_tokens (см. chat_ex)
 
 
 class GigaChatClient:
@@ -93,10 +93,11 @@ class GigaChatClient:
                 )
                 if resp.status_code == 200:
                     data = resp.json()
-                    return ChatResult(
-                        text=data["choices"][0]["message"]["content"],
-                        tokens=data.get("usage", {}).get("total_tokens", 0),
-                    )
+                    usage = data.get("usage", {})
+                    # GigaChat не включает в total_tokens повторяющийся (кэшируемый) промпт, а отдаёт его
+                    # отдельно в precached_prompt_tokens; для учёта лимитов считаем всё — оценка сверху
+                    tokens = usage.get("total_tokens", 0) + usage.get("precached_prompt_tokens", 0)
+                    return ChatResult(text=data["choices"][0]["message"]["content"], tokens=tokens)
                 last_status = resp.status_code
                 if last_status in (401, 429) or last_status >= 500:
                     logger.warning(f"GigaChat HTTP {last_status}, попытка {attempt}/{MAX_RETRIES}")
