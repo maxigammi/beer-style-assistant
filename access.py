@@ -4,21 +4,33 @@
 Админы (ADMIN_IDS) имеют доступ всегда. Остальные попадают в список, только
 погасив действующий инвайт-код. Хранилище живёт в отдельном файле и не
 зависит от индекса, поэтому переживает переиндексацию.
+
+Все операции, меняющие состав пользователей или инвайтов, идут в транзакции
+BEGIN IMMEDIATE: блокировка записи берётся сразу, поэтому даже два процесса
+(например, старый и новый экземпляр бота при рестарте) не могут одновременно
+погасить один код или создать дубль пользователя.
 """
 
+import logging
 import secrets
 import sqlite3
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
+
+logger = logging.getLogger(__name__)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
     user_id   INTEGER PRIMARY KEY,
     username  TEXT,
     joined_at INTEGER NOT NULL,
-    invite    TEXT
+    invite    TEXT,
+    last_seen INTEGER,
+    questions INTEGER NOT NULL DEFAULT 0,
+    blocked   INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS invites (
     code       TEXT PRIMARY KEY,
@@ -31,7 +43,21 @@ CREATE TABLE IF NOT EXISTS invites (
 );
 """
 
+# Колонки, добавленные после первой версии схемы: для баз, созданных раньше
+MIGRATIONS = {
+    "users": {
+        "last_seen": "INTEGER",
+        "questions": "INTEGER NOT NULL DEFAULT 0",
+        "blocked": "INTEGER NOT NULL DEFAULT 0",
+    },
+}
+
 DAY = 86400
+
+# Результаты redeem(). Пользователю показываем одно и то же для всех неудач,
+# а причина нужна логам и админу (по ней видно перебор и повторное использование).
+OK, ALREADY = "ok", "already"
+FAILURES = ("not_found", "used_up", "expired", "revoked", "blocked", "busy")
 
 
 @dataclass
@@ -47,17 +73,55 @@ class User:
     user_id: int
     username: Optional[str]
     joined_at: int
+    last_seen: Optional[int]
+    questions: int
+    blocked: bool
 
 
 class AccessStore:
     def __init__(self, path: Path):
         Path(path).parent.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(str(path))
+        # isolation_level=None: транзакциями управляем сами (см. _tx);
+        # timeout: другой процесс, держащий запись, подождёт, а не упадёт сразу
+        self.db = sqlite3.connect(str(path), timeout=10, isolation_level=None)
         self.db.executescript(SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        for table, columns in MIGRATIONS.items():
+            existing = {row[1] for row in self.db.execute(f"PRAGMA table_info({table})")}
+            for name, ddl in columns.items():
+                if name not in existing:
+                    self.db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+                    logger.info(f"Миграция: {table}.{name} добавлена")
+
+    @contextmanager
+    def _tx(self):
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            yield
+        except BaseException:
+            self.db.execute("ROLLBACK")
+            raise
+        self.db.execute("COMMIT")
+
+    # ---------- проверка доступа ----------
 
     def is_member(self, user_id: int) -> bool:
-        row = self.db.execute("SELECT 1 FROM users WHERE user_id = ?", (user_id,)).fetchone()
+        row = self.db.execute(
+            "SELECT 1 FROM users WHERE user_id = ? AND blocked = 0", (user_id,)
+        ).fetchone()
         return row is not None
+
+    def touch(self, user_id: int, username: Optional[str]) -> None:
+        """Отмечает активность (и актуализирует username, он мог смениться)."""
+        self.db.execute("UPDATE users SET last_seen = ?, username = ? WHERE user_id = ?",
+                        (int(time.time()), username, user_id))
+
+    def count_question(self, user_id: int) -> None:
+        self.db.execute("UPDATE users SET questions = questions + 1 WHERE user_id = ?", (user_id,))
+
+    # ---------- инвайты ----------
 
     def create_invite(self, created_by: int, max_uses: int = 1, days: int = 7) -> str:
         code = secrets.token_urlsafe(8)  # ~64 бита; символы безопасны для deep link
@@ -66,28 +130,50 @@ class AccessStore:
             "INSERT INTO invites (code, created_by, created_at, expires_at, max_uses) VALUES (?,?,?,?,?)",
             (code, created_by, now, now + days * DAY, max_uses),
         )
-        self.db.commit()
         return code
 
     def redeem(self, code: str, user_id: int, username: Optional[str]) -> str:
-        """Возвращает 'ok', 'already' (уже в списке, инвайт не тратится) или 'invalid'."""
-        if self.is_member(user_id):
-            return "already"
+        """
+        Гасит инвайт. Возвращает OK, ALREADY (уже участник — инвайт не тратится,
+        чтобы админ мог проверить собственную ссылку) либо причину отказа из FAILURES.
+        """
         now = int(time.time())
-        # Один атомарный UPDATE: проверка лимита, срока и отзыва + списание использования
-        cur = self.db.execute(
-            "UPDATE invites SET uses = uses + 1 "
-            "WHERE code = ? AND revoked = 0 AND uses < max_uses AND expires_at > ?",
-            (code, now),
-        )
-        if cur.rowcount != 1:
-            return "invalid"
-        self.db.execute(
-            "INSERT INTO users (user_id, username, joined_at, invite) VALUES (?,?,?,?)",
-            (user_id, username, now, code),
-        )
-        self.db.commit()
-        return "ok"
+        try:
+            with self._tx():
+                # Проверки и списание в одной транзакции: между ними никто не вклинится
+                user = self.db.execute("SELECT blocked FROM users WHERE user_id = ?", (user_id,)).fetchone()
+                if user is not None:
+                    return "blocked" if user[0] else ALREADY
+
+                cur = self.db.execute(
+                    "UPDATE invites SET uses = uses + 1 "
+                    "WHERE code = ? AND revoked = 0 AND uses < max_uses AND expires_at > ?",
+                    (code, now),
+                )
+                if cur.rowcount != 1:
+                    return self._why_failed(code, now)
+
+                self.db.execute(
+                    "INSERT INTO users (user_id, username, joined_at, invite, last_seen) VALUES (?,?,?,?,?)",
+                    (user_id, username, now, code, now),
+                )
+                return OK
+        except sqlite3.OperationalError as e:  # база занята дольше timeout
+            logger.warning(f"redeem: база занята: {e}")
+            return "busy"
+
+    def _why_failed(self, code: str, now: int) -> str:
+        row = self.db.execute(
+            "SELECT revoked, uses, max_uses, expires_at FROM invites WHERE code = ?", (code,)
+        ).fetchone()
+        if row is None:
+            return "not_found"
+        revoked, uses, max_uses, expires_at = row
+        if revoked:
+            return "revoked"
+        if uses >= max_uses:
+            return "used_up"
+        return "expired"
 
     def active_invites(self) -> List[Invite]:
         rows = self.db.execute(
@@ -99,14 +185,32 @@ class AccessStore:
 
     def revoke(self, code: str) -> bool:
         cur = self.db.execute("UPDATE invites SET revoked = 1 WHERE code = ? AND revoked = 0", (code,))
-        self.db.commit()
         return cur.rowcount == 1
 
-    def users(self) -> List[User]:
-        rows = self.db.execute("SELECT user_id, username, joined_at FROM users ORDER BY joined_at").fetchall()
-        return [User(*r) for r in rows]
+    def revoke_all(self) -> int:
+        """Отзывает все действующие инвайты (например, после тестов). Возвращает их число."""
+        cur = self.db.execute(
+            "UPDATE invites SET revoked = 1 WHERE revoked = 0 AND uses < max_uses AND expires_at > ?",
+            (int(time.time()),),
+        )
+        return cur.rowcount
 
-    def remove_user(self, user_id: int) -> bool:
-        cur = self.db.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
-        self.db.commit()
+    # ---------- пользователи ----------
+
+    def users(self) -> List[User]:
+        rows = self.db.execute(
+            "SELECT user_id, username, joined_at, last_seen, questions, blocked FROM users ORDER BY joined_at"
+        ).fetchall()
+        return [User(r[0], r[1], r[2], r[3], r[4], bool(r[5])) for r in rows]
+
+    def block_user(self, user_id: int) -> bool:
+        """
+        Блокирует, а не удаляет: иначе исключённый мог бы вернуться по многоразовому
+        инвайту, в котором ещё остались использования.
+        """
+        cur = self.db.execute("UPDATE users SET blocked = 1 WHERE user_id = ? AND blocked = 0", (user_id,))
+        return cur.rowcount == 1
+
+    def unblock_user(self, user_id: int) -> bool:
+        cur = self.db.execute("UPDATE users SET blocked = 0 WHERE user_id = ? AND blocked = 1", (user_id,))
         return cur.rowcount == 1

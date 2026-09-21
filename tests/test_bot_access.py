@@ -120,23 +120,46 @@ async def scenario():
 
     # 8. Админ выгоняет — доступ пропадает
     await say(ADMIN, f"/kick {STRANGER}")
-    assert "Доступ отозван" in last_to(session, ADMIN)
+    assert "заблокирован" in last_to(session, ADMIN)
     calls = botmod.pipeline.calls
     await say(STRANGER, "ещё вопрос")
     assert "по приглашениям" in last_to(session, STRANGER)
     assert botmod.pipeline.calls == calls
 
-    # 9. Перебор кодов: после 5 неудач бот замолкает
-    before = len(session.sent)
+    # 9. Перебор кодов: после 5 неудач бот замолкает, а админа уведомляют один раз
+    to_user4 = lambda: len([1 for c, _ in session.sent if c == 4])  # noqa: E731
+    to_admin = lambda: len([1 for c, t in session.sent if c == ADMIN and "Неудачная попытка" in t])  # noqa: E731
+    admin_before = to_admin()
     for i in range(5):
         await say(4, f"/start bad{i}")
-    assert len(session.sent) == before + 5
+    assert to_user4() == 5 and to_admin() == admin_before + 1
+    assert "not_found" in last_to(session, ADMIN)  # причина известна админу...
+    assert "not_found" not in last_to(session, 4)  # ...но не пользователю
     await say(4, "/start bad-again")
-    assert len(session.sent) == before + 5  # шестая попытка проигнорирована
+    assert to_user4() == 5  # шестая попытка проигнорирована
 
     # 10. Админ работает без инвайта
     await say(ADMIN, "какая горечь у IPA?")
     assert botmod.pipeline.calls == calls + 1
+
+    # 11. Заблокированный не возвращается по многоразовому коду; /unblock возвращает
+    await say(ADMIN, "/invite 5 7")
+    multi = re.search(r"Код: (\S+)", last_to(session, ADMIN)).group(1)
+    await say(STRANGER, f"/start {multi}")  # STRANGER заблокирован ещё в п. 8
+    assert "недействителен" in last_to(session, STRANGER)
+    assert "blocked" in last_to(session, ADMIN)
+    await say(STRANGER, "вопрос")
+    assert "по приглашениям" in last_to(session, STRANGER)
+    await say(ADMIN, f"/unblock {STRANGER}")
+    assert "возвращён" in last_to(session, ADMIN)
+    await say(STRANGER, "вопрос")
+    assert "ответ про пиво" in last_to(session, STRANGER)
+
+    # 12. /users показывает активность, /revoke all отзывает всё
+    await say(ADMIN, "/users")
+    assert "вопросов: 2" in last_to(session, ADMIN)  # два вопроса STRANGER (п. 5 и п. 11)
+    await say(ADMIN, "/revoke all")
+    assert "Отозвано инвайтов: 1" in last_to(session, ADMIN)
 
 
 def test_access_flow():
@@ -145,4 +168,4 @@ def test_access_flow():
 
 if __name__ == "__main__":
     test_access_flow()
-    print("ok  test_access_flow: 10 сценариев пройдено")
+    print("ok  test_access_flow: 12 сценариев пройдено")

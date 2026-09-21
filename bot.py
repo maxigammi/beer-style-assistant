@@ -57,7 +57,10 @@ class AccessMiddleware(BaseMiddleware):
         user = event.from_user
         if user is None:
             return None
-        if has_access(user.id) or OPEN_COMMANDS.match(event.text or ""):
+        if has_access(user.id):
+            access.touch(user.id, user.username)
+            return await handler(event, data)
+        if OPEN_COMMANDS.match(event.text or ""):
             return await handler(event, data)
         logger.info(f"Отказ в доступе: id={user.id} username={user.username}")
         await event.answer(DENIED_TEXT)
@@ -65,6 +68,14 @@ class AccessMiddleware(BaseMiddleware):
 
 
 dp.message.outer_middleware(AccessMiddleware())
+
+
+async def notify_admins(text: str) -> None:
+    for admin_id in config.ADMIN_IDS:
+        try:
+            await bot.send_message(admin_id, text)
+        except Exception:
+            logger.warning(f"Не удалось уведомить админа {admin_id}")
 
 
 def too_many_bad_codes(user_id: int) -> bool:
@@ -93,6 +104,7 @@ async def send_long(message: Message, text: str, limit: int = 4000) -> None:
 async def ask(message: Message, query: str) -> None:
     user_id = message.from_user.id
     logger.info(f"Вопрос от {user_id}: {query}")
+    access.count_question(user_id)
     status = await message.answer("Ищу в справочнике…")
     try:
         user_history = history.setdefault(user_id, [])
@@ -121,18 +133,21 @@ async def cmd_start(message: Message, command: CommandObject):
             logger.warning(f"Слишком много неверных кодов от {user.id}")
             return  # молчим: перебор кодов ничего не даёт
         result = access.redeem(code, user.id, user.username)
-        if result == "invalid":
+        if result != "ok":
+            first_failure = not bad_codes.get(user.id)  # список уже очищен от старых попыток выше
             bad_codes.setdefault(user.id, []).append(time.time())
-            logger.info(f"Неверный инвайт от {user.id}")
+            who = f"id={user.id}, username=@{user.username or '—'}"
+            # Пользователю причина не раскрывается (нельзя отличить «нет такого» от «уже использован»),
+            # а в лог и админу она нужна: по ней видно перебор и пересылку ссылок
+            logger.warning(f"Инвайт отклонён ({result}): {who}, код={code[:4]}…")
+            # Опечатки — не чаще раза в час на человека, чтобы перебор не заспамил админа;
+            # попытка вернуться после блокировки важнее — о ней сообщаем всегда (потолок: MAX_BAD_CODES/час)
+            if first_failure or result == "blocked":
+                await notify_admins(f"Неудачная попытка входа: {who}, причина: {result}")
             await message.answer("Код недействителен: он неверный, просрочен или уже использован.")
             return
         logger.info(f"Новый пользователь {user.id} ({user.username}) по инвайту")
-        for admin_id in config.ADMIN_IDS:
-            try:
-                await bot.send_message(admin_id, f"Новый пользователь: id={user.id}, "
-                                                 f"username=@{user.username or '—'}")
-            except Exception:
-                logger.warning(f"Не удалось уведомить админа {admin_id}")
+        await notify_admins(f"Новый пользователь: id={user.id}, username=@{user.username or '—'}")
         await message.answer("Доступ открыт!")
     await message.answer(
         "Привет! Я Beer Style Assistant — справочник по пивным стилям BJCP 2021.\n\n"
@@ -147,8 +162,8 @@ async def cmd_start(message: Message, command: CommandObject):
 ADMIN_HELP = (
     "\n\nАдминистратор:\n"
     "/invite [чел=1] [дней=7] — создать инвайт\n"
-    "/invites — действующие инвайты, /revoke КОД — отозвать\n"
-    "/users — список пользователей, /kick ID — убрать\n"
+    "/invites — действующие инвайты, /revoke КОД|all — отозвать\n"
+    "/users — список пользователей, /kick ID — заблокировать, /unblock ID — вернуть\n"
     "/ingest — переиндексация базы"
 )
 
@@ -226,7 +241,10 @@ async def cmd_invites(message: Message):
 async def cmd_revoke(message: Message, command: CommandObject):
     code = (command.args or "").strip()
     if not code:
-        await message.answer("Формат: /revoke КОД")
+        await message.answer("Формат: /revoke КОД (или /revoke all — отозвать все действующие)")
+        return
+    if code == "all":
+        await message.answer(f"Отозвано инвайтов: {access.revoke_all()}")
         return
     ok = access.revoke(code)
     await message.answer("Инвайт отозван." if ok else "Такой действующий инвайт не найден.")
@@ -239,21 +257,38 @@ async def cmd_users(message: Message):
     if not users:
         await message.answer("Приглашённых пользователей пока нет.")
         return
-    lines = [f"{u.user_id} @{u.username or '—'} — с {fmt_date(u.joined_at)}" for u in users]
-    await message.answer(f"Пользователи ({len(users)}):\n" + "\n".join(lines) + "\n\nУбрать: /kick ID")
+    lines = [
+        f"{'⛔ ' if u.blocked else ''}{u.user_id} @{u.username or '—'} — вопросов: {u.questions}, "
+        f"был: {fmt_date(u.last_seen) if u.last_seen else '—'}"
+        for u in users
+    ]
+    await message.answer(f"Пользователи ({len(users)}):\n" + "\n".join(lines)
+                         + "\n\nЗаблокировать: /kick ID, вернуть: /unblock ID")
 
 
 @dp.message(Command("kick"))
 @admin_only
 async def cmd_kick(message: Message, command: CommandObject):
     arg = (command.args or "").strip()
-    if not arg.lstrip("-").isdigit():
+    if not arg.isdigit():
         await message.answer("Формат: /kick ID (список: /users)")
         return
     user_id = int(arg)
-    removed = access.remove_user(user_id)
+    blocked = access.block_user(user_id)
     history.pop(user_id, None)
-    await message.answer("Доступ отозван." if removed else "Такого пользователя нет в списке.")
+    await message.answer("Доступ заблокирован (повторный вход по инвайту тоже закрыт)."
+                         if blocked else "Такого активного пользователя нет в списке.")
+
+
+@dp.message(Command("unblock"))
+@admin_only
+async def cmd_unblock(message: Message, command: CommandObject):
+    arg = (command.args or "").strip()
+    if not arg.isdigit():
+        await message.answer("Формат: /unblock ID")
+        return
+    ok = access.unblock_user(int(arg))
+    await message.answer("Доступ возвращён." if ok else "Этот пользователь не заблокирован.")
 
 
 @dp.message(Command("ingest"))

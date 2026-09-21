@@ -26,14 +26,14 @@ def test_single_use_invite_is_consumed():
     s = make_store()
     code = s.create_invite(1, max_uses=1)
     assert s.redeem(code, 10, None) == "ok"
-    assert s.redeem(code, 11, None) == "invalid"
+    assert s.redeem(code, 11, None) == "used_up"
     assert not s.is_member(11)
 
 
 def test_multi_use_invite():
     s = make_store()
     code = s.create_invite(1, max_uses=2)
-    assert [s.redeem(code, u, None) for u in (10, 11, 12)] == ["ok", "ok", "invalid"]
+    assert [s.redeem(code, u, None) for u in (10, 11, 12)] == ["ok", "ok", "used_up"]
 
 
 def test_member_redeeming_again_does_not_burn_a_use():
@@ -46,7 +46,7 @@ def test_member_redeeming_again_does_not_burn_a_use():
 
 def test_unknown_code_is_invalid():
     s = make_store()
-    assert s.redeem("nope", 10, None) == "invalid"
+    assert s.redeem("nope", 10, None) == "not_found"
     assert not s.is_member(10)
 
 
@@ -55,7 +55,7 @@ def test_expired_invite_is_invalid():
     code = s.create_invite(1)
     s.db.execute("UPDATE invites SET expires_at = ? WHERE code = ?", (int(time.time()) - 1, code))
     s.db.commit()
-    assert s.redeem(code, 10, None) == "invalid"
+    assert s.redeem(code, 10, None) == "expired"
     assert s.active_invites() == []
 
 
@@ -64,15 +64,69 @@ def test_revoked_invite_is_invalid():
     code = s.create_invite(1)
     assert s.revoke(code)
     assert not s.revoke(code)  # повторный отзыв ничего не меняет
-    assert s.redeem(code, 10, None) == "invalid"
+    assert s.redeem(code, 10, None) == "revoked"
 
 
-def test_remove_user_cuts_access():
+def test_block_cuts_access_and_blocks_rejoin():
     s = make_store()
-    s.redeem(s.create_invite(1), 10, "a")
-    assert s.remove_user(10)
+    code = s.create_invite(1, max_uses=5)
+    s.redeem(code, 10, "a")
+    assert s.block_user(10)
     assert not s.is_member(10)
-    assert not s.remove_user(10)
+    assert not s.block_user(10)
+    # главное: исключённый не возвращается по тому же многоразовому коду
+    assert s.redeem(code, 10, "a") == "blocked"
+    assert not s.is_member(10)
+    assert s.unblock_user(10) and s.is_member(10)
+
+
+def test_blocked_attempt_does_not_burn_invite():
+    s = make_store()
+    code = s.create_invite(1, max_uses=1)
+    s.redeem(s.create_invite(1), 10, "a")
+    s.block_user(10)
+    assert s.redeem(code, 10, "a") == "blocked"
+    assert s.redeem(code, 11, "b") == "ok"
+
+
+def test_revoke_all():
+    s = make_store()
+    for _ in range(3):
+        s.create_invite(1)
+    assert s.revoke_all() == 3
+    assert s.active_invites() == []
+    assert s.revoke_all() == 0
+
+
+def test_activity_counters():
+    s = make_store()
+    s.redeem(s.create_invite(1), 10, "old")
+    s.touch(10, "new")
+    s.count_question(10)
+    s.count_question(10)
+    (u,) = s.users()
+    assert (u.username, u.questions, u.blocked) == ("new", 2, False)
+    assert u.last_seen is not None
+
+
+def test_migration_from_first_schema():
+    """База, созданная первой версией (без last_seen/questions/blocked), должна открываться."""
+    import sqlite3
+    path = Path(tempfile.mkdtemp()) / "access.db"
+    old = sqlite3.connect(str(path))
+    old.executescript("""
+        CREATE TABLE users (user_id INTEGER PRIMARY KEY, username TEXT, joined_at INTEGER NOT NULL, invite TEXT);
+        CREATE TABLE invites (code TEXT PRIMARY KEY, created_by INTEGER NOT NULL, created_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL, max_uses INTEGER NOT NULL, uses INTEGER NOT NULL DEFAULT 0,
+            revoked INTEGER NOT NULL DEFAULT 0);
+        INSERT INTO users VALUES (7, 'legacy', 1, 'x');
+    """)
+    old.commit()
+    old.close()
+    s = AccessStore(path)
+    assert s.is_member(7)
+    s.count_question(7)
+    assert s.users()[0].questions == 1
 
 
 def test_state_survives_reopen():
