@@ -146,6 +146,12 @@ NO_CONTEXT_REPLY = (
 
 # ========== ЛОГИРОВАНИЕ ==========
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+
+# Файл лога. Не задан: bot.log рядом с кодом. Пустое значение: без файла, только stdout
+# (в Docker этого достаточно: логи читаются через docker logs). Если писать в файл нельзя,
+# бот не падает, а продолжает работать только с выводом в stdout (см. bot.build_log_handlers).
+_log_file = os.getenv("LOG_FILE")
+LOG_FILE = BASE_DIR / "bot.log" if _log_file is None else (Path(_log_file) if _log_file.strip() else None)
 LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 
 

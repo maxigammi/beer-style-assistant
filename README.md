@@ -143,7 +143,7 @@ config.py         настройки и промпты
 rag/              embedder, vectorstore, loader, pipeline, compare (сравнение), verify (проверка чисел)
 llm/gigachat.py   клиент GigaChat
 scripts/          fetch_bjcp, ingest, try_query
-tests/            тесты и демо переписки
+tests/            тесты и демо переписки (запуск: python tests/<имя>.py)
 deploy/           systemd-служба, проверка сервера, инструкция по развёртыванию
 assets/           аватар бота (avatar.png) и скрипт, которым он нарисован
 data/styles/      база знаний (markdown)

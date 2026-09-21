@@ -26,17 +26,28 @@ import config
 import smalltalk
 from access import AccessStore, User
 
-logging.basicConfig(
-    level=getattr(logging, config.LOG_LEVEL),
-    format=config.LOG_FORMAT,
-    handlers=[
-        # Лог рядом с кодом (а не в текущей папке) и с ротацией: на сервере файл не должен расти вечно
-        logging.handlers.RotatingFileHandler(config.BASE_DIR / "bot.log", maxBytes=5_000_000,
-                                             backupCount=3, encoding="utf-8"),
-        logging.StreamHandler(),
-    ],
-)
+def build_log_handlers(log_file):
+    """
+    stdout всегда; файл с ротацией (5 МБ x 3) только если его можно открыть. Возвращает
+    (обработчики, текст предупреждения или None). Недоступный для записи файл (типично: в Docker каталог
+    кода принадлежит root, а процесс работает от обычного пользователя) не должен убивать бота.
+    """
+    handlers = [logging.StreamHandler()]
+    warning = None
+    if log_file:
+        try:
+            handlers.append(logging.handlers.RotatingFileHandler(
+                log_file, maxBytes=5_000_000, backupCount=3, encoding="utf-8"))
+        except OSError as e:
+            warning = f"Лог-файл {log_file} недоступен для записи ({e.strerror}), логи только в stdout"
+    return handlers, warning
+
+
+_handlers, _log_warning = build_log_handlers(config.LOG_FILE)
+logging.basicConfig(level=getattr(logging, config.LOG_LEVEL), format=config.LOG_FORMAT, handlers=_handlers)
 logger = logging.getLogger(__name__)
+if _log_warning:
+    logger.warning(_log_warning)
 
 dp = Dispatcher()
 pipeline = None  # создаётся в main() после проверки конфигурации
