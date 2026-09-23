@@ -18,16 +18,17 @@ from typing import Dict, List, Optional, Tuple
 
 import config
 from config import (
-    ANSWER_TEMPERATURE, BUSY_REPLY, EMBED_MODEL, FAMILY_LIST_LIMIT, GROUP_FALLBACK_MIN_SCORE, GROUP_FALLBACK_TOP_K, LIST_STYLES_UP_TO,
-    MAX_CONTEXT_CHARS, MIN_SCORE, NO_CONTEXT_REPLY, RAG_PROMPT_TEMPLATE, STYLES_DIR, SYSTEM_PROMPT,
-    TOP_K_RESULTS, TRAITS_MAX_STYLES, TRAITS_PROMPT, UNDERSTAND_PROMPT,
+    ANSWER_TEMPERATURE, BUSY_REPLY, EMBED_MODEL, FALLBACK_PROMPT, FAMILY_LIST_LIMIT,
+    GROUP_FALLBACK_MIN_SCORE, GROUP_FALLBACK_TOP_K, LIST_STYLES_UP_TO, MAX_CONTEXT_CHARS, MIN_SCORE,
+    NO_CONTEXT_REPLY, RAG_PROMPT_TEMPLATE, STYLES_DIR, SYSTEM_PROMPT, TOP_K_RESULTS, TRAITS_MAX_STYLES,
+    TRAITS_PROMPT, UNDERSTAND_PROMPT,
 )
 from llm.gigachat import GigaChatBusy, GigaChatClient, GigaChatError
 from rag.compare import Group, assign_groups, overall_impression, render_facts, render_family, title_of
 from rag.embedder import OpenAIEmbedder
 from rag.loader import load_styles
 from rag.vectorstore import FAISSVectorStore, SearchHit
-from rag.verify import unsupported_numbers
+from rag.verify import unsupported_numbers, unsupported_terms
 
 logger = logging.getLogger(__name__)
 
@@ -187,6 +188,48 @@ class RAGPipeline:
         return Answer(render_family(plan.keyword, chunks, FAMILY_LIST_LIMIT),
                       sources=[c.source for c in chunks], used_rag=True, tokens=plan.tokens, mode="family")
 
+    def _chat_verified(self, messages: List[Dict[str, str]], context: str, query: str) -> Tuple[str, int, List[str]]:
+        """
+        Один вызов модели + проверка кодом (числа и английские термины не из контекста) с одной
+        попыткой исправить, если проверка нашла выдумку. Возвращает (текст, токены, предупреждения).
+        """
+        result = self.llm.chat_ex(messages, temperature=ANSWER_TEMPERATURE)
+        tokens, text, warnings = result.tokens, result.text, []
+
+        # Вопрос — тоже «легальный» источник слов: если пользователь сам написал «New England»,
+        # это не выдумка модели, даже если BJCP сейчас называет стиль иначе (Hazy IPA)
+        allowed = context + "\n" + query
+        bad_numbers = unsupported_numbers(text, context)
+        bad_terms = unsupported_terms(text, allowed)
+        if bad_numbers or bad_terms:  # одна попытка исправить: выдуманные числа и названия — самое вредное
+            logger.warning(f"Не из контекста — числа: {bad_numbers}, термины: {bad_terms}; просим исправить")
+            complaints = []
+            if bad_numbers:
+                complaints.append(f"числа, которых нет в контексте: {', '.join(bad_numbers)}")
+            if bad_terms:
+                complaints.append(f"названия (сорта, ингредиенты и т.п.), которых нет в контексте: "
+                                  f"{', '.join(bad_terms)}")
+            fix = messages + [
+                {"role": "assistant", "content": text},
+                {"role": "user", "content": (
+                    f"В ответе есть {'; '.join(complaints)}. Перепиши ответ, используя только то, что "
+                    "есть в контексте. Если конкретного значения или названия в контексте нет, а есть "
+                    "только общее описание — приведи это общее описание и прямо скажи, что точного "
+                    "значения или названия в базе нет. Не придумывай значения и названия от себя.")},
+            ]
+            retry = self.llm.chat_ex(fix, temperature=ANSWER_TEMPERATURE)
+            tokens += retry.tokens
+            text = retry.text
+            bad_numbers = unsupported_numbers(text, context)
+            bad_terms = unsupported_terms(text, allowed)
+            if bad_numbers:
+                logger.warning(f"После исправления остались числа не из контекста: {bad_numbers}")
+                warnings.append(f"числа не из контекста: {', '.join(bad_numbers)}")
+            if bad_terms:
+                logger.warning(f"После исправления остались термины не из контекста: {bad_terms}")
+                warnings.append(f"термины не из контекста: {', '.join(bad_terms)}")
+        return text, tokens, warnings
+
     def _answer_lookup(self, query: str, plan: Plan, history) -> Answer:
         hits = self.retrieve(plan.query)
         if not hits:
@@ -199,27 +242,22 @@ class RAGPipeline:
 
         tokens = plan.tokens
         try:
-            result = self.llm.chat_ex(messages, temperature=ANSWER_TEMPERATURE)
-            tokens += result.tokens
-            text, warnings = result.text, []
+            text, used, warnings = self._chat_verified(messages, context, query)
+            tokens += used
 
-            bad = unsupported_numbers(text, context)
-            if bad:  # одна попытка исправить: числа из головы — самая вредная выдумка
-                logger.warning(f"Числа не из контекста: {bad}; просим исправить")
-                fix = messages + [
-                    {"role": "assistant", "content": text},
-                    {"role": "user", "content": (
-                        f"В ответе есть числа, которых нет в контексте: {', '.join(bad)}. "
-                        "Перепиши ответ, используя только числа из контекста. Если нужного числа "
-                        "в контексте нет, скажи, что в базе его нет.")},
+            # Основной промпт (много правил сразу) иногда отказывает и там, где в контексте есть
+            # уместное общее описание — резервный проход с более простым, однозначным промптом
+            # (без истории: у него другой характер и своя, более короткая инструкция)
+            if text.strip() == NO_CONTEXT_REPLY.strip():
+                fallback_messages = [
+                    {"role": "system", "content": FALLBACK_PROMPT},
+                    {"role": "user", "content": RAG_PROMPT_TEMPLATE.format(context=context, query=query)},
                 ]
-                retry = self.llm.chat_ex(fix, temperature=ANSWER_TEMPERATURE)
-                tokens += retry.tokens
-                text = retry.text
-                bad = unsupported_numbers(text, context)
-                if bad:
-                    logger.warning(f"После исправления остались числа не из контекста: {bad}")
-                    warnings.append(f"числа не из контекста: {', '.join(bad)}")
+                fb_text, fb_used, fb_warnings = self._chat_verified(fallback_messages, context, query)
+                tokens += fb_used
+                if fb_text.strip() != NO_CONTEXT_REPLY.strip():
+                    logger.info("Резервный проход дал содержательный ответ там, где основной отказал")
+                    text, warnings = fb_text, fb_warnings
         except GigaChatBusy as e:
             logger.warning(str(e))
             return Answer(BUSY_REPLY, tokens=plan.tokens)

@@ -8,7 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from rag.compare import (Group, assign_groups, matches, midpoint_mean, parse_stats,  # noqa: E402
                          render_facts, title_of)
 from rag.loader import load_styles  # noqa: E402
-from rag.verify import unsupported_numbers  # noqa: E402
+from rag.verify import unsupported_numbers, unsupported_terms  # noqa: E402
 
 CHUNKS = load_styles(Path(__file__).resolve().parent.parent / "data" / "styles")
 BY_CODE = {c.code: c for c in CHUNKS}
@@ -115,6 +115,21 @@ def test_verify_numbers():
     assert unsupported_numbers("Горечь около 65 IBU", ctx) == ["65"]
     assert unsupported_numbers("Стиль 21A, 3 примера, пункт 2", ctx) == []  # код стиля и мелкие числа не в счёт
     assert unsupported_numbers("ABV 8.2% и 8.2%, IBU 90", ctx) == ["8.2", "90"]  # без повторов, по порядку
+
+
+def test_verify_terms():
+    ctx = "American or New World hops with fruity characteristics. Munich Dunkel is a dark lager."
+    q = "Какой хмель используется в New England IPA?"
+    # Слова из контекста — не выдумка, даже если модель их не изменила
+    assert unsupported_terms("Используются American хмели с фруктовым характером", ctx) == []
+    # Слово из ВОПРОСА пользователя (New England) — тоже не выдумка, даже если не в контексте BJCP
+    assert unsupported_terms("Это характерно для New England IPA", ctx + "\n" + q) == []
+    # А вот вымышленные сорта — ловятся, без повторов, по порядку
+    assert unsupported_terms("Обычно это Citra, Mosaic и снова Citra", ctx) == ["Citra", "Mosaic"]
+    # Всё-заглавные аббревиатуры (IPA, IBU, BJCP) не подходят под паттерн — не проверяются вовсе
+    assert unsupported_terms("Стиль IPA имеет высокий IBU по BJCP", ctx) == []
+    # Регистр контекста не важен (сравнение без учёта регистра)
+    assert unsupported_terms("используются MUNICH солода", "мягкий munich характер") == []
 
 
 if __name__ == "__main__":

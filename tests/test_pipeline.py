@@ -280,8 +280,16 @@ def test_lookup_invented_number_triggers_one_retry():
     ans = pipe.answer("Какая горечь у American IPA?")
     assert len(llm.calls) == 3 and "40–70" in ans.text and ans.warnings == []
     fix_request = llm.calls[2]["messages"][-1]["content"]
-    assert "65" in fix_request and "только числа из контекста" in fix_request
+    assert "65" in fix_request and "числа, которых нет в контексте" in fix_request
     assert ans.tokens == 300  # суммируются все три вызова
+
+
+def test_lookup_invented_term_triggers_one_retry():
+    pipe, llm = lookup_pipeline("Используется хмель Citra.", "Используются американские хмели.")
+    ans = pipe.answer("Какая горечь у American IPA?")
+    assert len(llm.calls) == 3 and "Citra" not in ans.text and ans.warnings == []
+    fix_request = llm.calls[2]["messages"][-1]["content"]
+    assert "Citra" in fix_request and "названия" in fix_request
 
 
 def test_lookup_still_invented_after_retry_is_delivered_with_warning():
@@ -289,6 +297,30 @@ def test_lookup_still_invented_after_retry_is_delivered_with_warning():
     ans = pipe.answer("Какая горечь у American IPA?")
     assert len(llm.calls) == 3 and "65" in ans.text
     assert ans.warnings == ["числа не из контекста: 65"]  # админ увидит, пользователь получит ответ
+
+
+def test_lookup_falls_back_when_primary_refuses_but_context_has_something():
+    """Основной промпт иногда отказывает («…нет информации об этом»), хотя контекст релевантен —
+    резервный проход с более простым промптом получает шанс ответить содержательно."""
+    pipe, llm = lookup_pipeline(config.NO_CONTEXT_REPLY, "Используются американские хмели.")
+    ans = pipe.answer("Какой хмель используется?")
+    assert ans.text == "Используются американские хмели." and ans.warnings == []
+    assert len(llm.calls) == 3  # разбор + отказ основного + резервный
+    assert llm.calls[2]["messages"][0]["content"] == config.FALLBACK_PROMPT
+    assert ans.used_rag and ans.tokens == 300
+
+
+def test_lookup_fallback_also_refusing_keeps_primary_refusal():
+    pipe, llm = lookup_pipeline(config.NO_CONTEXT_REPLY, config.NO_CONTEXT_REPLY)
+    ans = pipe.answer("Как приготовить борщ по этому стилю?")
+    assert ans.text == config.NO_CONTEXT_REPLY
+    assert len(llm.calls) == 3  # резерв тоже вызывался, просто тоже отказал
+
+
+def test_lookup_fallback_not_triggered_when_primary_answers():
+    pipe, llm = lookup_pipeline("Горечь American IPA — 40–70 IBU.")
+    pipe.answer("Какая горечь у American IPA?")
+    assert len(llm.calls) == 2  # резервный проход не понадобился, лишнего вызова нет
 
 
 def test_lookup_without_relevant_styles_does_not_call_llm_for_answer():
