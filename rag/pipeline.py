@@ -13,7 +13,7 @@ RAG-пайплайн: понять вопрос → найти стили → о
 import json
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional, Tuple
 
 import config
@@ -24,6 +24,7 @@ from config import (
     TRAITS_PROMPT, UNDERSTAND_PROMPT,
 )
 from llm.gigachat import GigaChatBusy, GigaChatClient, GigaChatError
+from rag.cache import AnswerCache
 from rag.compare import Group, assign_groups, overall_impression, render_facts, render_family, title_of
 from rag.embedder import OpenAIEmbedder
 from rag.loader import load_styles
@@ -44,6 +45,7 @@ class Answer:
     tokens: int = 0  # токены GigaChat на весь запрос; основа для будущих лимитов
     mode: str = "lookup"  # lookup | compare
     warnings: List[str] = field(default_factory=list)  # для отладки: что не удалось подтвердить
+    from_cache: bool = False  # для отладки: отдан без обращения к GigaChat
 
 
 @dataclass
@@ -90,6 +92,7 @@ class RAGPipeline:
         self.embedder = embedder or OpenAIEmbedder()
         self.vectorstore = vectorstore or FAISSVectorStore()
         self.llm = llm or GigaChatClient()
+        self.cache = AnswerCache()
         self.is_loaded = self.vectorstore.load()
         if self.is_loaded and self.vectorstore.embed_model != self.embedder.model:
             # Векторы из разных моделей несравнимы — поиск вернул бы мусор
@@ -110,6 +113,7 @@ class RAGPipeline:
         self.vectorstore.build(chunks, vectors, self.embedder.model)
         self.vectorstore.save()
         self.is_loaded = True
+        self.cache.clear()  # база могла измениться — старые ответы под вопросом
         return len(chunks)
 
     # ---------- понимание вопроса ----------
@@ -165,20 +169,32 @@ class RAGPipeline:
     def answer(self, query: str, history: Optional[List[Dict[str, str]]] = None) -> Answer:
         if not self.is_loaded:
             return Answer("База знаний не загружена. Администратор должен выполнить /ingest.")
+        # Кеш только без истории: с историей один и тот же текст вопроса может значить разное
+        # («а какой у него цвет?» зависит от того, что спрашивали раньше).
+        if not history:
+            cached = self.cache.get(query)
+            if cached is not None:
+                return replace(cached, from_cache=True)
         try:
             plan = self.understand(query, history)
         except GigaChatBusy as e:
             logger.warning(str(e))
             return Answer(BUSY_REPLY)
         if plan.intent == "compare":
-            return self._answer_compare(plan)
-        if plan.intent == "family":
-            answer = self._answer_family(plan)
-            if answer is not None:
-                return answer
-            # Меньше двух стилей с таким словом в названии — это обычная справка
-            plan = Plan("lookup", query=f"{query}\n{plan.keyword} beer style", tokens=plan.tokens)
-        return self._answer_lookup(query, plan, history)
+            result = self._answer_compare(plan)
+        elif plan.intent == "family":
+            result = self._answer_family(plan)
+            if result is None:
+                # Меньше двух стилей с таким словом в названии — это обычная справка
+                plan = Plan("lookup", query=f"{query}\n{plan.keyword} beer style", tokens=plan.tokens)
+                result = self._answer_lookup(query, plan, history)
+        else:
+            result = self._answer_lookup(query, plan, history)
+        # used_rag=False — это «занято»/«ошибка»/«база не загружена»: такое кешировать нельзя,
+        # иначе временная неполадка застрянет в кеше и будет отдаваться уже после того, как пройдёт.
+        if not history and result.used_rag:
+            self.cache.set(query, result)
+        return result
 
     def _answer_family(self, plan: Plan) -> Optional[Answer]:
         """Полный список стилей семейства (по названию), без участия модели. None — не семейство."""
@@ -328,4 +344,7 @@ class RAGPipeline:
             "is_loaded": self.is_loaded,
             "chat_model": self.llm.model,
             "configured_embed_model": EMBED_MODEL,
+            "cache_size": len(self.cache),
+            "cache_hits": self.cache.hits,
+            "cache_misses": self.cache.misses,
         }

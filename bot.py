@@ -153,6 +153,7 @@ def format_answer(answer, debug: bool = False) -> str:
     if debug and answer.sources:
         text += ("\n\n— отладка —\nИсточники: " + "; ".join(answer.sources)
                  + f"\nрежим {answer.mode} · score {answer.top_score:.3f} · токены {answer.tokens}"
+                 + (" · из кеша" if answer.from_cache else "")
                  + "".join(f"\n⚠ {w}" for w in answer.warnings))
     return text
 
@@ -240,6 +241,8 @@ async def cmd_stats(message: Message):
         f"Стилей: {s['chunks']}, размерность векторов: {s['dimension']}\n"
         f"Эмбеддинги: {s['embed_model'] or s['configured_embed_model']}\n"
         f"Генерация: {s['chat_model']}\n"
+        f"Кеш ответов: {s['cache_size']} записей, {s['cache_hits']} попаданий, "
+        f"{s['cache_misses']} промахов\n"
         f"Сообщений в твоей истории: {len(history.get(message.from_user.id, []))}"
     )
 
