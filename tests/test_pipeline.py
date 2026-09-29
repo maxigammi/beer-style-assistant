@@ -51,6 +51,9 @@ class StubEmbedder:
         self.queries.append(text)
         return np.zeros((1, 4), dtype=np.float32)
 
+    def embed_texts(self, texts):
+        return np.zeros((len(texts), 4), dtype=np.float32)
+
 
 class StubStore:
     """Настоящие чанки; поиск возвращает то, что заказал тест (по умолчанию — ничего)."""
@@ -70,6 +73,12 @@ class StubStore:
 
     def stats(self):
         return {"chunks": len(CHUNKS), "dimension": 4, "embed_model": "stub-embed"}
+
+    def build(self, chunks, vectors, embed_model):
+        pass
+
+    def save(self):
+        pass
 
 
 def hit(code, score=0.6):
@@ -330,6 +339,65 @@ def test_lookup_without_relevant_styles_does_not_call_llm_for_answer():
     ans = make(llm, hits=[hit("1A", 0.05)]).answer("Как приготовить борщ?")
     assert ans.text == config.NO_CONTEXT_REPLY and not ans.used_rag
     assert len(llm.calls) == 1
+
+
+# ---------- кеш ответов ----------
+
+def test_repeat_question_is_served_from_cache_without_hitting_llm_or_search():
+    pipe, llm = lookup_pipeline("Горечь American IPA — 40–70 IBU.")
+    store = pipe.vectorstore
+    first = pipe.answer("Какая горечь у American IPA?")
+    assert not first.from_cache and len(llm.calls) == 2 and store.searches == 1
+
+    second = pipe.answer("КАКАЯ горечь у American IPA?!")  # регистр/пунктуация не мешают совпадению
+    assert second.from_cache and second.text == first.text
+    assert len(llm.calls) == 2 and store.searches == 1  # ни разбор, ни поиск не повторились
+    assert pipe.cache.hits == 1 and pipe.cache.misses == 1
+
+
+def test_different_question_is_not_a_cache_hit():
+    # У каждого вопроса свой разбор (understand) + свой ответ — lookup_pipeline рассчитан на один
+    # вопрос за раз, поэтому здесь очередь ответов LLM собрана вручную.
+    llm = StubLLM(LOOKUP_JSON, "Горечь American IPA — 40–70 IBU.",
+                  LOOKUP_JSON, "Imperial Stout крепче обычного стаута.")  # без чисел — не спровоцирует ретрай
+    pipe = make(llm, hits=[hit("21A", 0.6), hit("22A", 0.55)])
+    pipe.answer("Какая горечь у American IPA?")
+    ans = pipe.answer("Какая крепость у Imperial Stout?")
+    assert not ans.from_cache and len(llm.calls) == 4
+
+
+def test_cache_is_bypassed_when_history_is_present():
+    """С историей один и тот же текст вопроса может значить разное — кеш не применяется ни на чтение, ни на запись."""
+    llm = StubLLM(LOOKUP_JSON, "Горечь American IPA — 40–70 IBU.",
+                  LOOKUP_JSON, "Горечь American IPA — 40–70 IBU.")
+    pipe = make(llm, hits=[hit("21A", 0.6), hit("22A", 0.55)])
+    history = [{"role": "user", "content": "..."}]
+    pipe.answer("Какая горечь у American IPA?", history)
+    ans = pipe.answer("Какая горечь у American IPA?", history)
+    assert not ans.from_cache and len(llm.calls) == 4 and len(pipe.cache) == 0
+
+
+def test_busy_and_empty_answers_are_not_cached():
+    """used_rag=False (занято/ошибка/нет данных): кешировать нельзя — временная неполадка не должна застревать."""
+    llm = StubLLM(GigaChatBusy("занят"), LOOKUP_JSON, GigaChatBusy("занят"))
+    pipe = make(llm, hits=[hit("21A")])
+    pipe.answer("Какая горечь у American IPA?")
+    pipe.answer("Какая горечь у American IPA?")
+    assert len(llm.calls) == 3 and len(pipe.cache) == 0  # второй раз снова обратился к LLM
+
+    llm2 = StubLLM(LOOKUP_JSON, LOOKUP_JSON)
+    pipe2 = make(llm2, hits=[hit("1A", 0.05)])  # ниже MIN_SCORE — «нет данных»
+    pipe2.answer("Как приготовить борщ?")
+    pipe2.answer("Как приготовить борщ?")
+    assert len(llm2.calls) == 2 and len(pipe2.cache) == 0
+
+
+def test_ingest_clears_cache():
+    pipe, llm = lookup_pipeline("Горечь American IPA — 40–70 IBU.")
+    pipe.answer("Какая горечь у American IPA?")
+    assert len(pipe.cache) == 1
+    pipe.ingest()
+    assert len(pipe.cache) == 0
 
 
 def test_busy_key_on_understanding_stops_immediately_with_a_clear_message():
