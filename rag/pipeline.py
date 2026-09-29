@@ -55,7 +55,7 @@ class Plan:
     tokens: int = 0
 
 
-def parse_plan(raw: str, user_query: str) -> Optional[Plan]:
+def parse_plan(raw: str) -> Optional[Plan]:
     """Достаёт JSON из ответа модели; None, если он невалиден (тогда работаем как со справкой)."""
     m = re.search(r"\{.*\}", raw, re.S)
     if not m:
@@ -78,10 +78,11 @@ def parse_plan(raw: str, user_query: str) -> Optional[Plan]:
         keyword = str(data.get("keyword", "")).strip()
         return Plan("family", keyword=keyword) if keyword else None
     english = str(data.get("query", "")).strip()
-    if english:
-        # Исходный текст оставляем: в нём могут быть названия марок и стилей как есть
-        return Plan("lookup", query=f"{user_query}\n{english}")
-    return None
+    # Только английский перевод: смешивание с исходным русским текстом в одном эмбеддинге уводило
+    # поиск в сторону (база BJCP целиком на английском). Названия стилей и марок, как их написал
+    # пользователь, для проверки ответа и так берутся из исходного query в _answer_lookup, отдельно
+    # от поиска — здесь их дублировать незачем.
+    return Plan("lookup", query=english) if english else None
 
 
 class RAGPipeline:
@@ -125,7 +126,7 @@ class RAGPipeline:
         except GigaChatError as e:
             logger.warning(f"Разбор вопроса не удался, ищем по исходному: {e}")
             return Plan("lookup", query=query)
-        plan = parse_plan(result.text, query)
+        plan = parse_plan(result.text)
         if plan is None:
             logger.warning(f"Не разобрал ответ модели, ищем по исходному вопросу: {result.text!r}")
             plan = Plan("lookup", query=query)

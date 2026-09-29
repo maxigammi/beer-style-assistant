@@ -83,15 +83,17 @@ def make(llm, hits=()):
 # ---------- разбор ответа модели ----------
 
 def test_parse_plan_variants():
-    assert parse_plan(COMPARE_JSON, "q").groups == [("портеры", "porter"), ("стауты", "stout")]
+    assert parse_plan(COMPARE_JSON).groups == [("портеры", "porter"), ("стауты", "stout")]
     wrapped = f"Вот JSON:\n```json\n{COMPARE_JSON}\n```"
-    assert parse_plan(wrapped, "q").intent == "compare"          # мусор вокруг JSON не мешает
-    lookup = parse_plan(LOOKUP_JSON, "Какая горечь у ИПА?")
-    assert lookup.intent == "lookup" and "Какая горечь у ИПА?" in lookup.query and "bitterness" in lookup.query
+    assert parse_plan(wrapped).intent == "compare"          # мусор вокруг JSON не мешает
+    lookup = parse_plan(LOOKUP_JSON)
+    # Только перевод модели: исходный русский текст сюда не подмешиваем (уводил поиск в сторону,
+    # база целиком на английском), названия марок/стилей для проверки ответа берутся отдельно.
+    assert lookup.intent == "lookup" and lookup.query == "American IPA bitterness"
     for bad in ("не json", "{сломанный", "[]", '{"intent": "lookup"}',
                 json.dumps({"intent": "compare", "groups": [{"label": "а", "keyword": "porter"}]}),  # одна сторона
                 json.dumps({"intent": "compare", "groups": [{"keyword": "stout"}, {"keyword": "Stout"}]})):  # дубли
-        assert parse_plan(bad, "q") is None, bad
+        assert parse_plan(bad) is None, bad
 
 
 def test_understand_falls_back_to_lookup():
@@ -219,9 +221,9 @@ FAMILY_JSON = json.dumps({"intent": "family", "keyword": "IPA"})
 
 
 def test_parse_family_plan():
-    plan = parse_plan(FAMILY_JSON, "расскажи про ипу")
+    plan = parse_plan(FAMILY_JSON)
     assert plan.intent == "family" and plan.keyword == "IPA"
-    assert parse_plan(json.dumps({"intent": "family"}), "q") is None  # без ключа — не разобрано
+    assert parse_plan(json.dumps({"intent": "family"})) is None  # без ключа — не разобрано
 
 
 def test_family_lists_every_style_and_asks_no_answer_model():
