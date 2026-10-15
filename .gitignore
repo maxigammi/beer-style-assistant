@@ -75,7 +75,7 @@ data/index/
 data/access.db*
 assets/avatar_preview.png
 
-# Личные материалы (отчёт по домашнему заданию)
+# Личные материалы (отчёты)
 report/
 
 # Окружение RAGAS для eval/
