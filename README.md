@@ -3,6 +3,8 @@
 Telegram-бот — справочник по пивным стилям [BJCP 2021](https://www.bjcp.org/) на основе RAG.
 Учебный проект: вопрос → поиск подходящих стилей в базе → ответ языковой модели только по найденным данным.
 
+Документация для передачи: [docs/handoff/](docs/handoff/01_PROJECT_OVERVIEW.md) (обзор, руководство по промптам, метрики и риски). Проверка качества поиска и RAGAS: [eval/](eval/README.md).
+
 ## Как это работает
 
 ```
@@ -150,6 +152,8 @@ rag/              embedder, vectorstore, loader, pipeline, compare (сравне
 llm/gigachat.py   клиент GigaChat
 scripts/          fetch_bjcp, ingest, try_query
 tests/            тесты и демо переписки (запуск: python tests/<имя>.py)
+eval/             проверка качества: поиск и RAGAS, вопросы с эталонами, результаты
+docs/handoff/     документация для передачи проекта
 assets/           аватар бота (avatar.png) и скрипт, которым он нарисован
 data/styles/      база знаний (markdown)
 ```

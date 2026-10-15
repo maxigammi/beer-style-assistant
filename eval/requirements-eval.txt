@@ -1,0 +1,15 @@
+# Только для оценки качества (report/eval). В боевые зависимости и Docker не входит.
+# Python 3.12 (на 3.14 у зависимостей ragas нет готовых сборок). Ветка langchain 0.3 нужна,
+# потому что ragas 0.4.3 импортирует модуль, который убрали из langchain-community 0.4.
+ragas==0.4.3
+langchain<1
+langchain-core<1
+langchain-community<0.4
+langchain-openai<1
+datasets
+faiss-cpu
+numpy
+python-dotenv
+requests
+truststore
+openai

@@ -77,3 +77,7 @@ assets/avatar_preview.png
 
 # Личные материалы (отчёт по домашнему заданию)
 report/
+
+# Окружение RAGAS для eval/
+eval/.venv-eval/
+eval/__pycache__/

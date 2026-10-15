@@ -1,0 +1,145 @@
+{
+  "top_k": 3,
+  "judge": "gpt-4o-mini",
+  "bot_model": "GigaChat-2-Pro",
+  "items": [
+    {
+      "id": "Q1",
+      "kind": "точный факт (числа)",
+      "question": "Какая крепость и горечь у английского портера?",
+      "answer": "Английский портер имеет крепость (ABV) от 4% до 5.4%, горечь (IBU) составляет от 18 до 35 единиц.",
+      "mode": "lookup",
+      "expects_refusal": false,
+      "sources": [
+        "BJCP 13C — English Porter",
+        "BJCP 20A — American Porter",
+        "BJCP 11C — Strong Bitter"
+      ],
+      "scores": [
+        0.585,
+        0.573,
+        0.521
+      ],
+      "warnings": [],
+      "metrics": {
+        "faithfulness": 1.0,
+        "answer_relevancy": 0.9417650254931444,
+        "context_precision": 0.99999999995,
+        "context_recall": 1.0
+      }
+    },
+    {
+      "id": "Q2",
+      "kind": "точный факт (дата)",
+      "question": "Когда впервые сварили Pilsner Urquell и кто это сделал?",
+      "answer": "Pilsner Urquell был впервые сварен в 1842 году баварским пивоваром по имени Josef Groll.",
+      "mode": "lookup",
+      "expects_refusal": false,
+      "sources": [
+        "BJCP 3B — Czech Premium Pale Lager",
+        "BJCP 5D — German Pils",
+        "BJCP 3A — Czech Pale Lager"
+      ],
+      "scores": [
+        0.454,
+        0.428,
+        0.423
+      ],
+      "warnings": [],
+      "metrics": {
+        "faithfulness": 1.0,
+        "answer_relevancy": 0.9005395865232613,
+        "context_precision": 0.8333333332916666,
+        "context_recall": 1.0
+      }
+    },
+    {
+      "id": "Q3",
+      "kind": "перефраз (синоним стиля)",
+      "question": "Какого цвета бельгийское белое пиво и почему оно мутное?",
+      "answer": "Бельгийское белое пиво (Witbier) имеет очень бледный соломенный до глубокого жёлтого цвета. Оно мутное из-за наличия взвеси из крахмала и дрожжей, что придаёт пиву характерный молочно-белесый оттенок.",
+      "mode": "lookup",
+      "expects_refusal": false,
+      "sources": [
+        "BJCP 25A — Belgian Blond Ale",
+        "BJCP 26A — Belgian Single",
+        "BJCP 24A — Witbier"
+      ],
+      "scores": [
+        0.489,
+        0.486,
+        0.481
+      ],
+      "warnings": [],
+      "metrics": {
+        "faithfulness": 1.0,
+        "answer_relevancy": 0.8328187220652113,
+        "context_precision": 0.5833333333041666,
+        "context_recall": 1.0
+      }
+    },
+    {
+      "id": "Q4",
+      "kind": "перефраз (описание вкуса)",
+      "question": "Какое тёмное пиво даёт вкус кофе и шоколада?",
+      "answer": "Такой вкус характерен для следующих стилей тёмного пива:\n\n1. **Czech Dark Lager** (3D) — может иметь шоколадные и кофейные оттенки благодаря использованию дебиттерованных жареных солодов. Эти вкусы варьируются от умеренных до практически отсутствующих, но должны дополнять основной солодовый характер, не доминируя над ним.\n\n2. **Schwarzbier** (8B) — обладает вкусом горького шоколада и лёгкой кофейности, без жжёных или резких оттенков. Этот стиль отличается сбалансированной горчинкой и сухим послевкусием.\n\nТаким образом, оба этих стиля способны передать вкус кофе и шоколада, хотя интенсивность и нюансы вкуса различаются.",
+      "mode": "lookup",
+      "expects_refusal": false,
+      "sources": [
+        "BJCP 3D — Czech Dark Lager",
+        "BJCP 8B — Schwarzbier",
+        "BJCP 2C — International Dark Lager"
+      ],
+      "scores": [
+        0.467,
+        0.461,
+        0.456
+      ],
+      "warnings": [],
+      "metrics": {
+        "faithfulness": 0.8888888888888888,
+        "answer_relevancy": 0.844323218237402,
+        "context_precision": 0.9999999999666667,
+        "context_recall": 0.2
+      }
+    },
+    {
+      "id": "Q5",
+      "kind": "нет ответа в базе",
+      "question": "Сколько калорий в бутылке Guinness?",
+      "answer": "В моей базе знаний нет информации о калорийности пива.",
+      "mode": "lookup",
+      "expects_refusal": true,
+      "sources": [
+        "BJCP 15B — Irish Stout",
+        "BJCP 15C — Irish Extra Stout",
+        "BJCP 14C — Scottish Export"
+      ],
+      "scores": [
+        0.393,
+        0.358,
+        0.309
+      ],
+      "warnings": [],
+      "metrics": {
+        "faithfulness": 0.0,
+        "answer_relevancy": 0.0,
+        "context_precision": 0.0,
+        "context_recall": 1.0
+      },
+      "refused_correctly": true
+    }
+  ],
+  "means_all": {
+    "faithfulness": 0.7777777777777778,
+    "answer_relevancy": 0.7038893104638039,
+    "context_precision": 0.6833333333024999,
+    "context_recall": 0.8400000000000001
+  },
+  "means": {
+    "faithfulness": 0.9722222222222222,
+    "answer_relevancy": 0.8798616380797548,
+    "context_precision": 0.8541666666281249,
+    "context_recall": 0.8
+  }
+}
